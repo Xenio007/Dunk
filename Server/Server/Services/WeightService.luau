@@ -319,7 +319,6 @@ local function giveWeightTool(player, weightName)
 
 	tool.Parent = backpack
 	bindWeightTool(player, tool)
-	ensureWeightFirst(player)
 end
 
 -- ===== HOTBAR ORDER =====
@@ -331,6 +330,7 @@ end
 local reorderingGuard = {}
 
 ensureWeightFirst = function(player)
+	do return end -- DISABLED: faulty hotbar reordering caused infinite network replication loop (Error 277).
 	if reorderingGuard[player] then return end
 	local backpack = player:FindFirstChildOfClass("Backpack")
 	if not backpack then return end
@@ -363,15 +363,14 @@ ensureWeightFirst = function(player)
 end
 
 local function watchBackpack(player, backpack)
-	-- Defer l'appel pour laisser Roblox finaliser l'ajout / le retrait avant
-	-- qu'on ré-ordonne. On hook ChildAdded ET ChildRemoved pour couvrir les
-	-- équipements / déséquipements rapides.
-	backpack.ChildAdded:Connect(function()
-		task.defer(ensureWeightFirst, player)
-	end)
-	backpack.ChildRemoved:Connect(function()
-		task.defer(ensureWeightFirst, player)
-	end)
+	-- DISABLED: ChildAdded/ChildRemoved connections caused an infinite network
+	-- replication loop via repeated tool reparenting (Error 277 crash).
+	-- backpack.ChildAdded:Connect(function()
+	-- 	task.defer(ensureWeightFirst, player)
+	-- end)
+	-- backpack.ChildRemoved:Connect(function()
+	-- 	task.defer(ensureWeightFirst, player)
+	-- end)
 end
 
 -- ===== HANDLERS JOUEUR =====
