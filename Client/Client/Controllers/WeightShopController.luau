@@ -215,7 +215,7 @@ function WeightShopController:Start()
 				local textLabel = robuxBtn:FindFirstChild("TextLabel")
 				if textLabel then
 					if config.Robux > 0 then
-						textLabel.Text = "" .. tostring(config.Robux)
+						textLabel.Text = "" .. tostring(config.Robux)
 					else
 						robuxBtn.Visible = false
 					end

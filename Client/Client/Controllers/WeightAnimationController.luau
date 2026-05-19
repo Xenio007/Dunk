@@ -112,25 +112,46 @@ function WeightAnimationController:Start()
 		local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
 		if not (leftHand and rightHand) then return end
 
-		-- IMPORTANT : on n'ancre PLUS le Handle. Roblox crée automatiquement un
-		-- Motor6D RightGrip entre RightHand et Handle quand le tool est équipé.
-		-- Si le Handle est Anchored=true, ce Motor6D devient une contrainte
-		-- physique invalide (RightHand libre + Handle ancré) qui crash le client.
-		-- On laisse le Handle suivre la main naturellement via le RightGrip,
-		-- positionné par Tool.Grip défini côté serveur.
+		-- On mémorise le handle pour pouvoir le désancrer dans stopBarbellFollow
 		barbellHandle = handle
+		
+		-- On l'ancre LOCALEMENT pour qu'il suive précisément sans être soumis à la gravité
+		-- et sans interférer avec la physique du personnage.
+		handle.Anchored = true
 
 		barbellFollowConn = RunService.RenderStepped:Connect(function()
-			-- No-op : le Handle suit la main droite via le Motor6D RightGrip créé
-			-- automatiquement par Roblox à l'équipement (positionné par Tool.Grip).
-			-- Avant on forçait son CFrame chaque frame pour le placer entre les
-			-- deux mains, mais ça impliquait d'ancrer le Handle, ce qui crashait
-			-- le solveur physique. On garde la connexion pour pouvoir la disconnecter
-			-- proprement via stopBarbellFollow, mais elle ne fait plus rien.
-			if not handle.Parent then
-				if barbellFollowConn then
-					barbellFollowConn:Disconnect()
-					barbellFollowConn = nil
+			if not (handle and handle.Parent) or not (character and character.Parent) then
+				stopBarbellFollow()
+				return
+			end
+			
+			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
+			local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+			
+			if lh and rh then
+				-- Position au milieu des deux mains
+				local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
+				
+				-- Ajustement d'orientation : on veut que la barre soit alignée avec
+				-- l'axe entre les deux mains.
+				local direction = (rh.Position - lh.Position).Unit
+				if direction.Magnitude > 0.01 then
+					-- On construit un CFrame dont l'axe transversal est aligné avec les mains.
+					local up = midCFrame.UpVector
+					local look = direction:Cross(up).Unit
+					local right = up:Cross(look).Unit
+					
+					local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
+					
+					-- Petite correction de rotation selon si c'est une barre ou une plaque
+					if isPlate then
+						handle.CFrame = targetCFrame 
+					else
+						-- Pour une barre, on l'oriente perpendiculairement à l'axe des mains
+						handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
+					end
+				else
+					handle.CFrame = midCFrame
 				end
 			end
 		end)

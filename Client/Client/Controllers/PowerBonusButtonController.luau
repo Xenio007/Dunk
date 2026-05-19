@@ -30,6 +30,7 @@ local SHOW_DURATION  = 8
 function PowerBonusButtonController:Start()
 	local player    = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
+	local WeightsConfig = require(ReplicatedStorage:WaitForChild("WeightsConfig"))
 
 	local mainGui = playerGui:WaitForChild("MainGui", 30)
 	if not mainGui then return end
@@ -135,6 +136,25 @@ function PowerBonusButtonController:Start()
 			showButton()
 		end
 	end)
+
+	-- ============================================================
+	-- Déséquipement du poids -> cache le bouton immédiatement
+	-- ============================================================
+	player.CharacterRemoving:Connect(hideButton)
+	
+	local function onCharacterAdded(character)
+		character.ChildRemoved:Connect(function(child)
+			if child:IsA("Tool") then
+				-- On vérifie si c'est un weight tool via WeightsConfig
+				if WeightsConfig.AnimationByWeight[child.Name] then
+					hideButton()
+				end
+			end
+		end)
+	end
+	
+	player.CharacterAdded:Connect(onCharacterAdded)
+	if player.Character then onCharacterAdded(player.Character) end
 
 	print("[PowerBonusButtonController] Prêt (utilise MainGui.ButtonPurpleClick)")
 end
