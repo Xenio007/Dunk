@@ -236,6 +236,17 @@ function WeightShopController:Start()
 					if ownedWeights[config.Name] then
 						equipWeightEvent:FireServer(config.Name)
 					else
+						-- Vérif client : si pas assez de cash, on affiche "Missing Cash"
+						-- au lieu de spammer le serveur silencieusement.
+						local cashVal = player:FindFirstChild("Cash")
+						local currentCash = cashVal and cashVal.Value or 0
+						if (config.Price or 0) > 0 and currentCash < config.Price then
+							local okNotif, notifier = pcall(Loader.GetController, "MissingCashNotifier")
+							if okNotif and notifier and notifier.Show then
+								notifier:Show("Missing Cash")
+							end
+							return
+						end
 						buyWeightEvent:FireServer(config.Name)
 					end
 				end)

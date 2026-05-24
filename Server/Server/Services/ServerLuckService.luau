@@ -38,17 +38,11 @@ local function now()
 	return Workspace:GetServerTimeNow()
 end
 
--- Retourne le step supérieur à partir du multiplier courant. Si on est déjà
--- au max, reste au max.
+-- Chaque achat DOUBLE simplement le multiplicateur courant. Pas de cap : si
+-- 5 joueurs achètent à la suite, on atteint x32 puis x64 etc.
 local function nextMultiplier(current)
-	local steps = GamepassConfig.SERVER_LUCK_STEPS
-	if not steps or #steps == 0 then return 2 end
-	for i = 1, #steps - 1 do
-		if steps[i] == current then
-			return steps[i + 1]
-		end
-	end
-	return steps[#steps] -- cappé au dernier step
+	current = math.max(1, tonumber(current) or 1)
+	return current * 2
 end
 
 -- Diffuse l'état à tous les clients. Utilisé à chaque changement + pour les

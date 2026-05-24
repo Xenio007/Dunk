@@ -19,6 +19,7 @@ local TweenService      = game:GetService("TweenService")
 
 local Loader     = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
+local VFXPlayer  = require(ReplicatedStorage.Shared:WaitForChild("VFXPlayer"))
 
 local PowerBonusButtonController = Loader.CreateController({
 	Name = "PowerBonusButtonController",
@@ -120,6 +121,17 @@ function PowerBonusButtonController:Start()
 	button.MouseButton1Click:Connect(function()
 		if not button.Visible then return end
 		powerBonusEvent:FireServer()
+
+		-- Joue StadiumVFX sur le character du joueur (sur le HumanoidRootPart
+		-- pour que l'effet soit centré sur lui). Local-only : seul le joueur
+		-- qui a cliqué voit le feedback. Le VFXPlayer respecte les attributs
+		-- EmitDelay/EmitCount/EmitDuration/TimeScale_* de chaque ParticleEmitter.
+		local character = player.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			VFXPlayer.PlayOnPart("StadiumVFX", hrp)
+		end
+
 		hideButton()
 	end)
 

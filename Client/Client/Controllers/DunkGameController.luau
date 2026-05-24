@@ -231,9 +231,12 @@ local function playPerfectSequence(player, gradeText, fill)
 		pcall(function() humanoid:UnequipTools() end)
 	end
 
-	-- Force le character à regarder vers -X (panier).
+	-- Force le character a la ligne X = 701 (couloir cinematique du PERFECT).
+	-- Le Z et le Y restent ceux du joueur, donc l'animation se joue dans le
+	-- couloir mais part de la profondeur Z d'ou il a lance.
 	local currentPos = hrp.Position
-	hrp.CFrame = CFrame.lookAt(currentPos, currentPos + Vector3.new(-1, 0, 0))
+	local teleportPos = Vector3.new(701, currentPos.Y, currentPos.Z)
+	hrp.CFrame = CFrame.lookAt(teleportPos, teleportPos + Vector3.new(-1, 0, 0))
 
 	-- ===== Caméra : vue 45° côté, suit le joueur fluide pendant tout le shot.
 	-- L'offset caméra est calculé UNE FOIS dans le repère local du joueur,
@@ -358,10 +361,13 @@ local function playPerfectSequence(player, gradeText, fill)
 				end
 				if released then return end
 				if not rightHand.Parent then return end
-				-- Block placé pour que la main soit légèrement EN DEDANS du block
-				-- (la main agrippe le block depuis l'intérieur, ce qui est visuellement
-				-- plus naturel qu'un block flottant au bout des doigts).
-				heldBlock:PivotTo(rightHand.CFrame * CFrame.new(0, -0.3, 0))
+				-- Block placé SUR LA PAUME de la main droite : on offset le block
+				-- vers le bas DE LA TAILLE DU BLOC pour que la main touche la face
+				-- supérieure du bloc (au lieu d'être dedans). On lit dynamiquement
+				-- la taille du block via sa bbox après scale.
+				local _, blockSize = heldBlock:GetBoundingBox()
+				local halfH = blockSize.Y * 0.5
+				heldBlock:PivotTo(rightHand.CFrame * CFrame.new(0, -halfH - 0.1, 0))
 			end)
 
 			task.delay(PERFECT_ANIM_RELEASE_TIME, function()
@@ -701,11 +707,13 @@ local function playJumpShotSequence(player, gradeText, fill)
 				if released then return end
 				if not rightHand.Parent or not leftHand.Parent then return end
 
-				-- Position : milieu des deux mains, légèrement abaissé pour que le
-				-- block reste au niveau du visage/poitrine quand l'anim lève les
-				-- bras (mais pas trop bas, le block doit rester dans les mains).
+				-- Position : milieu des deux mains. On décale le block vers le BAS
+				-- d'une demi-hauteur pour que les mains se posent SUR LE DESSUS du
+				-- block (au lieu d'être dedans).
 				local mid = (rightHand.Position + leftHand.Position) * 0.5
-				mid = mid - Vector3.new(0, 0.4, 0)
+				local _, blockSize = heldBlock:GetBoundingBox()
+				local halfH = blockSize.Y * 0.5
+				mid = mid - Vector3.new(0, halfH + 0.1, 0)
 				heldBlock:PivotTo(CFrame.new(mid))
 			end)
 

@@ -38,7 +38,7 @@ GamepassConfig.ICONS = {
 	BRAINROT_LUCK = "rbxassetid://83875465599007",
 	VIP           = "rbxassetid://79304377550054",
 	MUTATION_LUCK = "rbxassetid://90240660519266",
-	SERVER_LUCK   = "rbxassetid://83875465599007", -- fallback ; remplacer si besoin
+	SERVER_LUCK   = "rbxassetid://124859614241581", -- fallback ; remplacer si besoin
 }
 
 -- Multiplicateurs appliqués par les gamepasses.
@@ -46,12 +46,20 @@ GamepassConfig.CASH_X2_MULT        = 2
 GamepassConfig.POWER_X2_MULT       = 2
 GamepassConfig.SPEED_1_2X_MULT     = 1.2
 GamepassConfig.BRAINROT_LUCK_MULT  = 2  -- poids x2 sur les brainrots haut CPS
+-- VIP : x1.5 sur le cash (boutons brainrots placés + offline earnings) ET x2
+-- sur le luck (weighted pick des brainrots Normal au dunk). Combine avec
+-- BrainrotLuck en multipliant. Le VIP NE TOUCHE PAS au mutation luck.
+GamepassConfig.VIP_CASH_MULT       = 1.5
+GamepassConfig.VIP_LUCK_MULT       = 2
+-- MutationLuck (gamepass dédié uniquement) : 2x les chances de chaque mutation
+-- au roll (Gold, Diamond, Galaxy, Lava, Rainbow, Hacker). Chance par mutation
+-- clampée à 1.
+GamepassConfig.MUTATION_LUCK_MULT  = 2
 -- ServerLuck : boost temporaire partagé par TOUT le serveur.
 -- Achat x1 -> le serveur passe de 1x à 2x pendant 15 min.
--- Rachat pendant les 15 min -> passe à 3x, timer réinitialisé à 15 min.
--- Rachat suivant (pendant les 15 min) -> 4x, etc. Cap à un multiplicateur max.
+-- Rachat pendant les 15 min -> passe à 4x (puis 8x, 16x, 32x, ...), timer reset à 15 min.
+-- Pas de cap : chaque achat double le multiplicateur courant.
 GamepassConfig.SERVER_LUCK_DURATION  = 15 * 60  -- 15 minutes
-GamepassConfig.SERVER_LUCK_STEPS     = { 1, 2, 3, 4, 6 } -- échelle des multiplicateurs
 
 
 -- Contenu du StarterPack.
@@ -59,10 +67,13 @@ GamepassConfig.STARTER_BRAINROTS = { "Six Seven", "Tung Sahur" }
 GamepassConfig.STARTER_SPEED_LEVELS = 3
 
 -- Set des productIds pour reconnaissance rapide. Les IDs à 0 (gamepass non
--- encore publiés) sont ignorés pour éviter des collisions bidons.
+-- encore publiés) sont ignorés pour éviter des collisions bidons. SERVER_LUCK
+-- est EXCLU : ce produit est routé à ServerLuckService (boost temporaire),
+-- pas à GamepassService. L'inclure ferait que GamepassService.HandlePurchase
+-- avale l'achat sans rien faire et le boost ne s'appliquerait jamais.
 GamepassConfig.PRODUCT_ID_SET = {}
-for _, id in pairs(GamepassConfig.PRODUCTS) do
-	if id and id > 0 then
+for key, id in pairs(GamepassConfig.PRODUCTS) do
+	if id and id > 0 and key ~= "SERVER_LUCK" then
 		GamepassConfig.PRODUCT_ID_SET[id] = true
 	end
 end

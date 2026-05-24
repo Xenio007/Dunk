@@ -234,8 +234,23 @@ local function createBrainrotTool(template, rarity, level)
 	primary.Massless = true
 	primary.Anchored = false
 
+	-- D'abord, on nettoie tous les vieux Weld/WeldConstraint/Motor6D du clone
+	-- pour repartir d'une base propre. Sinon des liens cassés peuvent laisser
+	-- des MeshParts détachés du Handle (visible sur des brainrots avec énormément
+	-- de Cube/Part comme La Cucaracha, Pakrahmatmatina, Teddino Rosino).
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("WeldConstraint") or d:IsA("Weld") or d:IsA("Motor6D")
+			or d:IsA("ManualWeld") or d:IsA("Snap")
+		then
+			d:Destroy()
+		end
+	end
+
 	primary.Parent = tool
 
+	-- Welde TOUTES les BaseParts au Handle (sauf le Handle lui-même). On le
+	-- fait AVANT de reparenter pour que les WeldConstraint pointent vers des
+	-- parts qui sont déjà ancrées au Handle dès leur création.
 	for _, d in ipairs(clone:GetDescendants()) do
 		if d:IsA("BasePart") then
 			d.CanCollide = false
@@ -337,6 +352,12 @@ function BrainrotService:GiveBrainrotByName(player, brainrotName)
 end
 
 -- ===== Cycle de vie =====
+
+-- API publique : expose findBrainrot pour les autres services (lookup
+-- de template par nom, pour spawn ou autre).
+function BrainrotService:FindTemplate(brainrotName)
+	return findBrainrot(brainrotName)
+end
 
 function BrainrotService:Init()
 	brainrotsFolder = ReplicatedStorage:WaitForChild("Brainrots")

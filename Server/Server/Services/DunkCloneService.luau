@@ -21,12 +21,34 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
+local PhysicsService = game:GetService("PhysicsService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
+local AnimationCache = require(ReplicatedStorage.Shared:WaitForChild("AnimationCache"))
 
 local DunkCloneService = Loader.CreateService({
 	Name = "DunkCloneService",
 })
+
+-- Collision group dedie : le clone qui court ne doit collisionner avec rien
+-- (joueurs, autres clones, brainrots). Il garde CanCollide=true sur le HRP
+-- pour pouvoir simuler le fait d'etre sur le sol via raycast Humanoid, mais
+-- via le collision group on ignore toutes les autres collisions.
+local CLONE_RUNNER_COLLISION_GROUP = "DunkCloneRunner"
+local collisionGroupReady = false
+local function ensureCollisionGroup()
+	if collisionGroupReady then return end
+	collisionGroupReady = true
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(CLONE_RUNNER_COLLISION_GROUP)
+	end)
+	-- Le clone garde sa collision avec Default (le sol). On desactive ses
+	-- collisions avec lui-meme, et on rendra explicite la non-collision avec
+	-- les autres clones runners en repetant la regle pour le meme group.
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(CLONE_RUNNER_COLLISION_GROUP, CLONE_RUNNER_COLLISION_GROUP, false)
+	end)
+	end
 
 -- ===== Constantes =====
 local MAX_CLONE_LIFETIME = 60
@@ -157,27 +179,104 @@ end
 -- On rend toutes les parts du corps massless sauf le HRP, on supprime les
 -- collisions corps-corps, et on met une friction quasi nulle pour que la
 -- locomotion soit propre même à ~150-180 walkspeed.
+--
+-- IMPORTANT : on rend AUSSI le HRP non-collidable + non-queryable pour que :
+--   - le joueur puisse traverser le clone (visuel decoratif uniquement),
+--   - on ait un controle total sur la hauteur Y via raycast manuel
+--     (sinon le HRP s'enfonce dans le sol a haute vitesse / petites bumps).
+-- Le service ajoute ensuite un BodyVelocity pour que le clone reste pile
+-- au-dessus du sol via un raycast Heartbeat.
 local function preparePhysicsForRunning(clone)
+	ensureCollisionGroup()
 	local hrp = clone:FindFirstChild("HumanoidRootPart")
 	for _, d in ipairs(clone:GetDescendants()) do
 		if d:IsA("BasePart") then
 			d.Anchored = false
+			-- Aucune part ne collide : le joueur passe a travers le clone.
+			d.CanCollide = false
+			d.CanQuery = false
+			d.CanTouch = false
 			if d == hrp then
 				d.Massless = false
-				d.CanCollide = true
 			else
-				-- Les membres : massless + non collidables entre eux. Le Humanoid
-				-- garde un Hip-based controller stable car seul le HRP a de la masse.
+				-- Les membres : massless. Le Humanoid garde un Hip-based
+				-- controller stable car seul le HRP a de la masse.
 				d.Massless = true
-				d.CanCollide = false
 			end
-			-- Friction quasi nulle : densité 1 pour le HRP / 0.7 pour les membres,
-			-- friction 0.3, elasticité 0. Évite que les pieds attrapent le sol à
-			-- haute vitesse et fassent basculer le character vers l'avant.
+			-- Place dans le collision group dedie : zero collision avec
+			-- les autres clones et avec lui-meme.
+			pcall(function()
+				d.CollisionGroup = CLONE_RUNNER_COLLISION_GROUP
+			end)
 			local density = (d == hrp) and 1.0 or 0.01
-			d.CustomPhysicalProperties = PhysicalProperties.new(density, 0.3, 0, 1, 1)
+			d.CustomPhysicalProperties = PhysicalProperties.new(density, 0, 0, 1, 1)
 		end
 	end
+end
+
+-- Calcule la distance entre le HRP et le point le plus bas du clone
+-- (= bout des pieds en pose debout). Sert a placer le HRP exactement a
+-- groundY + footOffset pour que les pieds touchent le sol.
+local function computeFootOffset(clone)
+	local h = clone:FindFirstChild("HumanoidRootPart")
+	if not h then return 2.5 end
+	local minY = math.huge
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local cf = d.CFrame
+			local hx, hy, hz = d.Size.X * 0.5, d.Size.Y * 0.5, d.Size.Z * 0.5
+			for sx = -1, 1, 2 do
+				for sy = -1, 1, 2 do
+					for sz = -1, 1, 2 do
+						local wp = cf * Vector3.new(sx*hx, sy*hy, sz*hz)
+						if wp.Y < minY then minY = wp.Y end
+					end
+				end
+			end
+		end
+	end
+	if minY == math.huge then return 2.5 end
+	return h.Position.Y - minY
+end
+
+-- Maintient le clone PILE au-dessus du sol. Comme aucun part du clone n'a de
+-- collision (CanCollide=false partout), Roblox ne sait pas "poser" le clone
+-- au sol via la physique du Humanoid. On raycast manuellement chaque frame
+-- depuis le HRP, on calcule le groundY, et on force le HRP a groundY+footOffset.
+-- On annule aussi la velocite Y pour que la gravite n'enfonce pas le clone
+-- entre deux frames.
+local function bindGroundLock(clone, footOffset)
+	local info = activeClones[clone]
+	if not info then return end
+	local hrp = clone:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { clone }
+
+	local conn = RunService.Heartbeat:Connect(function()
+		if info.finished or not clone.Parent or not hrp.Parent then return end
+		local pos = hrp.Position
+		local ray = Workspace:Raycast(
+			pos + Vector3.new(0, 5, 0),
+			Vector3.new(0, -200, 0),
+			rayParams
+		)
+		if ray then
+			local targetY = ray.Position.Y + footOffset
+			if math.abs(pos.Y - targetY) > 0.01 then
+				hrp.CFrame = CFrame.new(pos.X, targetY, pos.Z) * (hrp.CFrame - hrp.CFrame.Position)
+			end
+		end
+		-- Annule la velocite verticale pour que la gravite n'enfonce pas
+		-- le clone (entre deux raycasts) ou ne le fasse pas "sauter".
+		local v = hrp.AssemblyLinearVelocity
+		if v.Y ~= 0 then
+			hrp.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+		end
+	end)
+	table.insert(info.connections, conn)
 end
 
 -- ===== API publique =====
@@ -402,28 +501,7 @@ function DunkCloneService:SpawnAndRun(player, spawnPos, targetPart, getSpeedFn)
 	-- haute vitesse (jusqu'à ~180 walkspeed avec Speed12X au max).
 	preparePhysicsForRunning(newClone)
 
-	-- Mesure pieds->HRP pour le placement.
-	local function getCloneFootOffset(c)
-		local h = c:FindFirstChild("HumanoidRootPart")
-		if not h then return 2.5 end
-		local minY = math.huge
-		for _, d in ipairs(c:GetDescendants()) do
-			if d:IsA("BasePart") then
-				local cf = d.CFrame
-				local hx, hy, hz = d.Size.X * 0.5, d.Size.Y * 0.5, d.Size.Z * 0.5
-				for sx = -1, 1, 2 do
-					for sy = -1, 1, 2 do
-						for sz = -1, 1, 2 do
-							local wp = cf * Vector3.new(sx*hx, sy*hy, sz*hz)
-							if wp.Y < minY then minY = wp.Y end
-						end
-					end
-				end
-			end
-		end
-		if minY == math.huge then return 2.5 end
-		return h.Position.Y - minY
-	end
+	-- (computeFootOffset est defini en haut du module)
 
 	-- Position le clone au sol à la position spawnPos.
 	local rayParams = RaycastParams.new()
@@ -435,8 +513,15 @@ function DunkCloneService:SpawnAndRun(player, spawnPos, targetPart, getSpeedFn)
 		rayParams
 	)
 	local groundY = ray and ray.Position.Y or spawnPos.Y
-	local footOffset = getCloneFootOffset(newClone)
-	local targetY = groundY + footOffset + 0.5
+	local footOffset = computeFootOffset(newClone)
+	-- Place le HRP exactement à groundY + footOffset (les pieds touchent le sol).
+	local targetY = groundY + footOffset
+
+	-- HipHeight basé sur la hauteur reelle du HRP : permet au Humanoid de
+	-- maintenir le clone debout. Sans ce HipHeight correct, le HRP est
+	-- gere par la gravite + raycast Roblox interne avec une hauteur par
+	-- defaut, qui peut le faire s'enfoncer dans le sol à haute vitesse.
+	newHum.HipHeight = math.max(0, footOffset - newHRP.Size.Y * 0.5)
 
 	-- Direction de course : vers le target (KickReady).
 	local kickReadyCenter = targetPart.Position
@@ -471,19 +556,22 @@ function DunkCloneService:SpawnAndRun(player, spawnPos, targetPart, getSpeedFn)
 		animator = Instance.new("Animator")
 		animator.Parent = newHum
 	end
-	local runAnim = Instance.new("Animation")
-	runAnim.AnimationId = "rbxassetid://507767714"
-	local okLoad, runTrack = pcall(function() return animator:LoadAnimation(runAnim) end)
-	if okLoad and runTrack then
+	-- Utilise AnimationCache : l'Animation instance est partagee et son contenu
+	-- a deja ete telecharge par AssetPreloader au join, donc LoadAnimation est
+	-- instantane (pas de hitch sur la premiere course).
+	local runTrack = AnimationCache.LoadOnAnimator(animator, "rbxassetid://507767714")
+	if runTrack then
 		runTrack.Looped = true
 		runTrack.Priority = Enum.AnimationPriority.Movement
 		runTrack:Play(0.1)
-	else
-		runTrack = nil
 	end
 
 	task.wait(0.05)
 	newHum:ChangeState(Enum.HumanoidStateType.Running)
+
+	-- Verrouille la position Y du clone au sol (raycast continu) pour qu'il
+	-- ne s'enfonce JAMAIS dans le sol, meme a 180 walkspeed.
+	bindGroundLock(newClone, footOffset)
 
 	local sideDir = Vector3.new(-forwardDir.Z, 0, forwardDir.X)
 	local endPos = kickReadyCenter - forwardDir * STOP_DISTANCE_BEFORE_TARGET
@@ -537,12 +625,8 @@ function DunkCloneService:SpawnAndRun(player, spawnPos, targetPart, getSpeedFn)
 				if runTrack then
 					pcall(function() runTrack:Stop(0.2) end)
 				end
-				local waitAnimInst = Instance.new("Animation")
-				waitAnimInst.AnimationId = WAIT_ANIM_ID
-				local okWait, waitTrack = pcall(function()
-					return animator:LoadAnimation(waitAnimInst)
-				end)
-				if okWait and waitTrack then
+				local waitTrack = AnimationCache.LoadOnAnimator(animator, WAIT_ANIM_ID)
+				if waitTrack then
 					waitTrack.Looped = true
 					waitTrack.Priority = Enum.AnimationPriority.Idle
 					waitTrack:Play(0.3)
@@ -617,28 +701,7 @@ function DunkCloneService:StandUpAndRun(clone, targetPart, getSpeedFn)
 	-- (coté éloigné), pour qu'il coure VERS KickReady.
 	local startPos = kickReadyCenter - forwardDir * 50
 
-	-- Mesure pieds->HRP pour le placement.
-	local function getCloneFootOffset(c)
-		local h = c:FindFirstChild("HumanoidRootPart")
-		if not h then return 2.5 end
-		local minY = math.huge
-		for _, d in ipairs(c:GetDescendants()) do
-			if d:IsA("BasePart") then
-				local cf = d.CFrame
-				local hx, hy, hz = d.Size.X * 0.5, d.Size.Y * 0.5, d.Size.Z * 0.5
-				for sx = -1, 1, 2 do
-					for sy = -1, 1, 2 do
-						for sz = -1, 1, 2 do
-							local wp = cf * Vector3.new(sx*hx, sy*hy, sz*hz)
-							if wp.Y < minY then minY = wp.Y end
-						end
-				end
-			end
-			end
-		end
-		if minY == math.huge then return 2.5 end
-		return h.Position.Y - minY
-	end
+	-- (computeFootOffset est defini en haut du module)
 
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -649,8 +712,10 @@ function DunkCloneService:StandUpAndRun(clone, targetPart, getSpeedFn)
 		rayParams
 	)
 	local groundY = ray and ray.Position.Y or kickReadyCenter.Y
-	local footOffset = getCloneFootOffset(newClone)
-	local targetY = groundY + footOffset + 0.5
+	local footOffset = computeFootOffset(newClone)
+	local targetY = groundY + footOffset
+
+	newHum.HipHeight = math.max(0, footOffset - newHRP.Size.Y * 0.5)
 	newHRP.CFrame = CFrame.lookAt(
 		Vector3.new(startPos.X, targetY, startPos.Z),
 		Vector3.new(startPos.X, targetY, startPos.Z) + forwardDir
@@ -671,19 +736,18 @@ function DunkCloneService:StandUpAndRun(clone, targetPart, getSpeedFn)
 		animator = Instance.new("Animator")
 		animator.Parent = newHum
 	end
-	local runAnim = Instance.new("Animation")
-	runAnim.AnimationId = "rbxassetid://507767714"
-	local okLoad, runTrack = pcall(function() return animator:LoadAnimation(runAnim) end)
-	if okLoad and runTrack then
+	local runTrack = AnimationCache.LoadOnAnimator(animator, "rbxassetid://507767714")
+	if runTrack then
 		runTrack.Looped = true
 		runTrack.Priority = Enum.AnimationPriority.Movement
 		runTrack:Play(0.1)
-	else
-		runTrack = nil
 	end
 
 	task.wait(0.1)
 	newHum:ChangeState(Enum.HumanoidStateType.Running)
+
+	-- Verrouille la position Y du clone au sol (raycast continu).
+	bindGroundLock(newClone, footOffset)
 
 	local sideDir = Vector3.new(-forwardDir.Z, 0, forwardDir.X)
 	local endPos = kickReadyCenter - forwardDir * STOP_DISTANCE_BEFORE_TARGET
@@ -721,12 +785,8 @@ function DunkCloneService:StandUpAndRun(clone, targetPart, getSpeedFn)
 			pcall(function() runTrack:Stop(0.2) end)
 		end
 
-		local waitAnimInst = Instance.new("Animation")
-		waitAnimInst.AnimationId = WAIT_ANIM_ID
-		local okWait, waitTrack = pcall(function()
-			return animator:LoadAnimation(waitAnimInst)
-		end)
-		if okWait and waitTrack then
+		local waitTrack = AnimationCache.LoadOnAnimator(animator, WAIT_ANIM_ID)
+		if waitTrack then
 			waitTrack.Looped = true
 			waitTrack.Priority = Enum.AnimationPriority.Idle
 			waitTrack:Play(0.3)

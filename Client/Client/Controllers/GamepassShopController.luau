@@ -14,6 +14,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local MarketplaceService = game:GetService("MarketplaceService")
+local SoundService = game:GetService("SoundService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
@@ -249,10 +250,30 @@ function GamepassShopController:Start()
 	end
 
 	-- Écoute les updates d'état des gamepasses pour (dés)afficher les icônes
-	-- ET pour maintenir le cache local utilisé au clic.
+	-- ET pour maintenir le cache local utilisé au clic. Joue aussi un son
+	-- d'achat quand un nouveau gamepass devient actif.
+	local purchaseSound = Instance.new("Sound")
+	purchaseSound.Name = "GamepassPurchaseSound"
+	purchaseSound.SoundId = "rbxassetid://3406813517"
+	purchaseSound.Volume = 1
+	purchaseSound.Parent = SoundService
+
+	local firstSync = true
 	local gamepassStateEvent = RemotesAPI.GetEvent("GamepassStateEvent")
 	gamepassStateEvent.OnClientEvent:Connect(function(flags)
-		activeFlags = flags or {}
+		flags = flags or {}
+		-- Détecte un nouveau flag passé à true (achat). Le premier sync au
+		-- spawn ne joue PAS le son (il reflète l'état persisté).
+		if not firstSync then
+			for flag, isActive in pairs(flags) do
+				if isActive and not activeFlags[flag] then
+					purchaseSound:Play()
+					break
+				end
+			end
+		end
+		firstSync = false
+		activeFlags = flags
 		if bottomRight then
 			syncIcons(bottomRight, activeFlags)
 		end

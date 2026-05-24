@@ -66,7 +66,10 @@ local FONT_MONTSERRAT_EXTRA_BOLD = Font.new(
 local SLOT_BG_COLOR = Color3.fromRGB(28, 28, 36)
 local SLOT_BG_SELECTED = Color3.fromRGB(60, 60, 78)
 local SLOT_STROKE_COLOR = Color3.fromRGB(0, 0, 0)
-local SLOT_STROKE_SELECTED = Color3.fromRGB(255, 215, 64)
+-- Couleur du contour quand un tool est equipe (selectionne). Blanc pour eviter
+-- la confusion avec la couleur de rarete Legendary (gold). La rarete est
+-- toujours indiquee sur le contour des slots non selectionnes via getBorderColorFor.
+local SLOT_STROKE_SELECTED = Color3.fromRGB(255, 255, 255)
 
 local SLOT_KEYS = {
 	{ label = "1", keyCode = Enum.KeyCode.One },
@@ -98,6 +101,7 @@ local topbarIcon
 local slotViews = {}
 local WeightsConfig
 local BrainrotImages
+local BrainrotInfo
 local IconModule
 
 local inventoryCells = {}
@@ -154,6 +158,16 @@ local function getBorderColorFor(tool)
 		local rarityColor = cfg.Rarity and WeightsConfig.RarityColors and WeightsConfig.RarityColors[cfg.Rarity]
 		return rarityColor or SLOT_STROKE_COLOR
 	end
+	-- Brainrot : on prefere la couleur de la RARETE (Common/Uncommon/Rare/...)
+	-- car c'est l'info la plus utile a montrer dans la hotbar (les variants sont
+	-- deja indiques par la teinte de l'icone elle-meme).
+	if BrainrotInfo then
+		local info = BrainrotInfo.GetInfo(name)
+		if info and info.RarityColor then
+			return info.RarityColor
+		end
+	end
+	-- Fallback : teinte du variant si BrainrotInfo n'a pas pu resoudre.
 	if BrainrotImages then
 		local _, tint = BrainrotImages.GetImageAndTint(name)
 		if tint and tint ~= Color3.fromRGB(255, 255, 255) then
@@ -173,7 +187,11 @@ local function createSlot(slotIndex)
 	frame.LayoutOrder = slotIndex
 	frame.Size = UDim2.fromOffset(SLOT_SIZE, SLOT_SIZE)
 	frame.BackgroundColor3 = SLOT_BG_COLOR
-	frame.BackgroundTransparency = 0.1
+	-- Transparency identique à celle utilisée par clearSlot pour qu'un slot
+	-- jamais rempli (au join du joueur sans brainrots) ait la même apparence
+	-- "vide" claire qu'un slot libéré après pose/vente. Sans ça les cases
+	-- au join avaient un fond foncé (0.1) au lieu du fond clair (0.35).
+	frame.BackgroundTransparency = 0.35
 	frame.AutoButtonColor = false
 	frame.Image = ""
 	frame.BorderSizePixel = 0
@@ -1209,6 +1227,9 @@ function SatchelController:Start()
 	end)
 	pcall(function()
 		BrainrotImages = require(ReplicatedStorage.Shared:WaitForChild("BrainrotImages", 10))
+	end)
+	pcall(function()
+		BrainrotInfo = require(ReplicatedStorage.Shared:WaitForChild("BrainrotInfo", 10))
 	end)
 
 	createHotbar()

@@ -452,11 +452,6 @@ local tbl_2_upvr = {
 		CashPerSecond = 120000;
 		Type = "None";
 	};
-	["Chestini Tralalero"] = {
-		RarityType = "God";
-		CashPerSecond = 135000;
-		Type = "None";
-	};
 	["Chicleteirina Bicicleteirina"] = {
 		RarityType = "God";
 		CashPerSecond = 220000;

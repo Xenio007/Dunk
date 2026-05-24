@@ -19,7 +19,7 @@ local ChaseVignetteController = Loader.CreateController({
 	Name = "ChaseVignetteController",
 })
 
-local VIG_COLOR = Color3.fromRGB(150, 14, 14)
+local VIG_COLOR = Color3.fromRGB(110, 18, 18)
 
 function ChaseVignetteController:Start()
 	local player    = Players.LocalPlayer
@@ -32,11 +32,23 @@ function ChaseVignetteController:Start()
 	gui.DisplayOrder   = 1800
 	gui.ResetOnSpawn   = false
 	gui.Enabled        = false
+	-- Sur mobile, les Frames opaques bloquent les inputs (touch). On désactive
+	-- l'interaction sur tout le ScreenGui pour que les boutons mobiles (jump,
+	-- joystick) restent cliquables à travers la vignette rouge.
+	gui.IgnoreGuiInset = true
+	pcall(function()
+		gui.ScreenInsets = Enum.ScreenInsets.None
+	end)
 	gui.Parent         = playerGui
 
 	local root = Instance.new("Frame")
 	root.BackgroundTransparency = 1
 	root.Size = UDim2.fromScale(1, 1)
+	-- Active=false + Interactable=false : la vignette est purement visuelle,
+	-- elle ne doit JAMAIS bloquer les inputs (touch sur mobile, clic sur les
+	-- boutons GUI au-dessous, etc.).
+	root.Active = false
+	pcall(function() root.Interactable = false end)
 	root.Parent = gui
 
 	-- Bandes verticales (top + bottom) pleine largeur, gradient transparent.
@@ -48,6 +60,8 @@ function ChaseVignetteController:Start()
 		f.Position = UDim2.fromScale(0, anchorY)
 		f.Size = UDim2.fromScale(1, 0.55)
 		f.ZIndex = 1
+		f.Active = false
+		pcall(function() f.Interactable = false end)
 		local grad = Instance.new("UIGradient")
 		grad.Rotation = 90
 		if side == "top" then
@@ -81,6 +95,8 @@ function ChaseVignetteController:Start()
 		f.Position = UDim2.fromScale(anchorX, 0)
 		f.Size = UDim2.fromScale(0.45, 1)
 		f.ZIndex = 2
+		f.Active = false
+		pcall(function() f.Interactable = false end)
 		local grad = Instance.new("UIGradient")
 		grad.Rotation = 0
 		if side == "left" then
@@ -117,9 +133,11 @@ function ChaseVignetteController:Start()
 	vignetteImg.Size = UDim2.fromScale(1, 1)
 	vignetteImg.AnchorPoint = Vector2.new(0.5, 0.5)
 	vignetteImg.Position = UDim2.fromScale(0.5, 0.5)
+	vignetteImg.Active = false
+	pcall(function() vignetteImg.Interactable = false end)
 	vignetteImg.Image = "rbxasset://textures/ui/Vignette.png"
 	vignetteImg.ImageColor3 = VIG_COLOR
-	vignetteImg.ImageTransparency = 0.4
+	vignetteImg.ImageTransparency = 0.55
 	vignetteImg.ScaleType = Enum.ScaleType.Stretch
 	vignetteImg.ZIndex = 3
 	vignetteImg.Parent = root
@@ -149,11 +167,14 @@ function ChaseVignetteController:Start()
 	local renderConn
 
 	local function setVisibility(v)
-		local baseTrans = 1 - v
+		-- v est le "facteur d'intensité" (0..1). On l'écrase un peu pour
+		-- rendre le contour moins agressif sans casser l'effet horror.
+		local vDimmed = v * 0.7
+		local baseTrans = 1 - vDimmed
 		for _, f in ipairs(bands) do
 			f.BackgroundTransparency = baseTrans
 		end
-		vignetteImg.ImageTransparency = math.min(1, 0.4 + (1 - v) * 0.6)
+		vignetteImg.ImageTransparency = math.min(1, 0.55 + (1 - vDimmed) * 0.45)
 	end
 
 	local function startAnimation()
@@ -204,9 +225,9 @@ function ChaseVignetteController:Start()
 			local v = math.clamp((baseVisibility + flicker) * intensity, 0, 1)
 			setVisibility(v)
 
-			cc.TintColor  = Color3.new(1, 1 - 0.18 * v, 1 - 0.22 * v)
-			cc.Saturation = -0.15 * v
-			cc.Contrast   = 0.08 * v
+			cc.TintColor  = Color3.new(1, 1 - 0.10 * v, 1 - 0.13 * v)
+			cc.Saturation = -0.08 * v
+			cc.Contrast   = 0.04 * v
 		end)
 	end
 

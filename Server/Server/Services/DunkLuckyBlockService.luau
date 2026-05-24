@@ -31,6 +31,7 @@ local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
 local SpeedConfig = require(ReplicatedStorage:WaitForChild("SpeedConfig"))
 local BrainrotInfo = require(ReplicatedStorage.Shared:WaitForChild("BrainrotInfo"))
 local GamepassConfig = require(ReplicatedStorage:WaitForChild("GamepassConfig"))
+local PlayerBrainrotTransform = require(script.Parent:WaitForChild("PlayerBrainrotTransform"))
 
 local DunkLuckyBlockService = Loader.CreateService({
 	Name = "DunkLuckyBlockService",
@@ -45,13 +46,41 @@ local DunkCloneService
 -- Zone de dunk côté client (KickReady). On retrouve le même dossier côté serveur
 -- pour calculer le point d'impact du LuckyBlock.
 local SPAWN_FOLDER_NAME = "Spawn"
+
+-- Brainrots exclus du pool de tirage. Ces brainrots ont un mesh skinné sans
+-- animation Walk : pendant le contrôle ils glissent au sol au lieu de marcher.
+-- En attendant un fix d'animation propre, on ne les tire pas. Le filtre
+-- s'applique aussi à leurs mutations (Diamond Trulimero, Gold Bananita, etc.).
+local EXCLUDED_BRAINROTS = {
+	["Trulimero Trulicina"] = true,
+	["Bananita Dolphinita"] = true,
+	["Orcalero Orcala"]     = true,
+	["Chillin Chili"]       = true,
+}
+
+-- Renvoie true si le brainrot (ou sa version mutante) est dans la liste
+-- d'exclusion. On strip le préfixe de mutation (Diamond / Gold / Galaxy / etc.)
+-- pour comparer le nom de base.
+local function isBrainrotExcluded(name)
+	if not name or name == "" then return false end
+	if EXCLUDED_BRAINROTS[name] then return true end
+	for excluded in pairs(EXCLUDED_BRAINROTS) do
+		-- Match "Diamond Trulimero Trulicina", "Gold Bananita Dolphinita", etc.
+		if name:sub(-#excluded) == excluded then return true end
+	end
+	return false
+end
 local AREAS_FOLDER_NAME = "Areas"
 local KICK_READY_NAME    = "KickReady"
 local SELL_MODEL_NAME    = "Sell"
 local BLOCK_PART_NAME    = "BlockPart"
 
 -- Durée de référence de la chute (ajustée selon la distance dans runSequence).
-local FALL_DURATION = 1.5
+-- Augmentée de 1.5 à 2.4s pour ralentir le vol du LuckyBlock dans les airs :
+-- le bloc se voyait passer trop vite, le swap de skin par zone n'était pas
+-- assez lisible. Avec 2.4s de base + 0.0014 par stud (clamp 2.1 à 5.5),
+-- le joueur a le temps de voir le bloc traverser chaque zone de rareté.
+local FALL_DURATION = 2.4
 -- Durée du spin (roulette) avant de révéler le brainrot.
 local SPIN_DURATION = 2.2
 -- Intervalle de switch du silhouette pendant le spin (ms -> sec).
@@ -221,19 +250,15 @@ end
 
 -- ===== Distance / Puissance =====
 -- Modèle : interpolation linéaire par morceaux en log(Power). Les courbes
--- sont calibrées pour la nouvelle arène (limite X = -2020, distance max 2680).
--- 120M PERFECT atteint pile le fond de l'arène (scale factor 0.881 appliqué
--- aux anciennes données calibrées pour 3041 studs max).
+-- sont calibrées pour la nouvelle arène (limite X = -2020, distance max
+-- ~2710 depuis le launch X=690). Pour atteindre le fond (X = -2020) il faut
+-- ~120M en PERFECT.
 --
--- PERFECT : (10 -> 51.3), (44.1K -> 492.7), (1M -> 988.5), (120M -> 2679.3)
--- BAD     : (10 -> 1.8),  (44.1K -> 127.1), (1M -> 271.4), (120M -> 801.9)
---
--- À 10 power + PERFECT -> X = 608.7 (atterrit juste devant le joueur).
--- À 1M + PERFECT -> X = -328.5.
--- Pour atteindre le fond (X = -2020) il faut ~120M en PERFECT.
+-- PERFECT : (10 -> 51.3), (44.1K -> 498), (1M -> 1000), (120M -> 2710)
+-- BAD     : (10 -> 1.8),  (44.1K -> 130),  (1M -> 280),  (120M -> 820)
 local CURVE_POINTS = {
-	PERFECT = { {10, 51.3}, {44100, 492.7}, {1000000, 988.5}, {120000000, 2679.3} },
-	BAD     = { {10, 1.8},  {44100, 127.1}, {1000000, 271.4}, {120000000, 801.9} },
+	PERFECT = { {10, 51.3}, {44100, 498}, {1000000, 1000}, {120000000, 2710} },
+	BAD     = { {10, 1.8},  {44100, 130}, {1000000, 280},  {120000000, 820} },
 }
 
 -- Poids d'interpolation entre BAD (0) et PERFECT (1) pour chaque grade.
@@ -298,7 +323,7 @@ end
 --   - MAX_X : bord intérieur côté spawn de la zone Common (~685).
 --   - MIN_X : fond de l'arène (= bord X- du WOg, X=-2121.2).
 local ARENA_MAX_X = 660    -- bord intérieur de la zone Common
-local ARENA_MIN_X = -2120  -- fond de l'arène (WOg)
+local ARENA_MIN_X = -2020  -- fond de l'arène (longueur max sur X demandée)
 
 -- Bande Z de l'escalier. Si landing.X tombe dans la range X de l'escalier ET
 -- landing.Z est dans cette bande, on décale le Z vers le côté le plus proche
@@ -338,23 +363,9 @@ local function computeLandingPosition(player, grade, fallbackPos)
 	local clampedX = math.clamp(landing.X, ARENA_MIN_X, ARENA_MAX_X)
 	local actualDist = math.abs(origin.X - clampedX)
 
-	-- Dévie le Z si on est sur l'escalier. L'escalier est une bande étroite
-	-- centrée sur la KickReady qui recouvre le milieu de la zone Common :
-	-- sans déviation, tout tir vers l'avant y atterrirait directement.
+	-- Pas de déviation Z : le tir va STRICTEMENT tout droit. La gestion
+	-- d'escaliers se fait côté design (le joueur doit ajuster son angle).
 	local landingZ = landing.Z
-	if clampedX >= STAIRS_X_MIN and clampedX <= STAIRS_X_MAX
-		and landingZ >= STAIRS_Z_MIN and landingZ <= STAIRS_Z_MAX
-	then
-		-- Pousse le Z vers le côté le plus proche hors de la bande escalier,
-		-- en restant dans les limites de la zone Common.
-		local center = (STAIRS_Z_MIN + STAIRS_Z_MAX) * 0.5
-		if landingZ <= center then
-			landingZ = STAIRS_Z_MIN - 1
-		else
-			landingZ = STAIRS_Z_MAX + 1
-		end
-		landingZ = math.clamp(landingZ, COMMON_Z_MIN, COMMON_Z_MAX)
-	end
 
 	-- Raycast vers le bas pour trouver le VRAI sol (les Bases sont souvent
 	-- bien plus basses que la zone KickReady).
@@ -467,15 +478,23 @@ end
 
 -- ===== MUTATIONS =====
 -- Après le tirage du brainrot Normal, on peut le "muter" (Gold, Diamond, etc.)
--- pour booster son CPS. Les probabilités sont indépendantes (on teste dans
--- l'ordre du plus rare au moins rare, le premier hit gagne).
+-- pour booster son CPS. On teste dans l'ordre du plus rare au moins rare,
+-- le premier hit gagne.
+--
+-- Chances cibles (sans gamepass MutationLuck) :
+--   Gold    : 1 / 25    = 4%
+--   Diamond : 1 / 50    = 2%
+--   Lava    : 1 / 100   = 1%
+--   Galaxy  : 1 / 250   = 0.4%
+--   Hacker  : 1 / 666   ≈ 0.15015%
+--   Rainbow : 1 / 5000  = 0.02%
 local MUTATION_ROLLS = {
-	{ name = "Hacker",  chance = 0.001 },  -- 0.1%,  x30 CPS
-	{ name = "Rainbow", chance = 0.005 },  -- 0.5%,  x15  CPS
-	{ name = "Lava",    chance = 0.025 },  -- 2.5%,  x8   CPS
-	{ name = "Galaxy",  chance = 0.05  },  -- 5%,    x6   CPS
-	{ name = "Diamond", chance = 0.10  },  -- 10%,   x4   CPS
-	{ name = "Gold",    chance = 0.15  },  -- 15%,   x2   CPS
+	{ name = "Rainbow", chance = 1 / 5000 },
+	{ name = "Hacker",  chance = 1 / 666  },
+	{ name = "Galaxy",  chance = 1 / 250  },
+	{ name = "Lava",    chance = 1 / 100  },
+	{ name = "Diamond", chance = 1 / 50   },
+	{ name = "Gold",    chance = 1 / 25   },
 }
 
 -- Tire une mutation ou nil (= reste Normal). Tests indépendants du plus rare
@@ -608,6 +627,7 @@ end
 -- brainrotsFolder.<Mutation>. Retourne le template mutant ou nil si absent.
 local function findMutatedTemplate(baseTemplate, mutation)
 	if not baseTemplate or not mutation then return nil end
+	if isBrainrotExcluded(baseTemplate.Name) then return nil end
 	local mutFolder = brainrotsFolder and brainrotsFolder:FindFirstChild(mutation)
 	if not mutFolder then return nil end
 	local mutantName = mutation .. " " .. baseTemplate.Name
@@ -624,7 +644,9 @@ local function listNormalBrainrots()
 	local normal = brainrotsFolder and brainrotsFolder:FindFirstChild("Normal")
 	if not normal then return out end
 	for _, m in ipairs(normal:GetChildren()) do
-		if m:IsA("Model") and not BrainrotInfo.IsExclusive(m.Name) then
+		if m:IsA("Model") and not BrainrotInfo.IsExclusive(m.Name)
+			and not isBrainrotExcluded(m.Name)
+		then
 			table.insert(out, m)
 			end
 	end
@@ -731,7 +753,9 @@ local function listBrainrotsByRarity(rarity, luckMult)
 	if not normal then return out, weights end
 
 	for _, m in ipairs(normal:GetChildren()) do
-		if m:IsA("Model") and not BrainrotInfo.IsExclusive(m.Name) then
+		if m:IsA("Model") and not BrainrotInfo.IsExclusive(m.Name)
+			and not isBrainrotExcluded(m.Name)
+		then
 			local info = BrainrotInfo.GetInfo(m.Name)
 			if info and info.RarityType == rarity then
 				table.insert(out, m)
@@ -862,21 +886,32 @@ local function runSequence(player, grade, fill)
 	local impactPos = landingPos
 
 	-- Position de départ du projectile (devant le joueur, légèrement en l'air).
+	-- En PERFECT : on FORCE X=701 pour que l'animation Superman se joue
+	-- toujours sur la meme ligne X (le couloir cinematique). Le Z reste celui
+	-- du joueur pour que l'animation parte de l'endroit d'ou il a lance.
 	local char = player.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	local launchOrigin
 	if hrp then
-		launchOrigin = hrp.Position + Vector3.new(-3, 4, 0)
+		if grade == "PERFECT" then
+			launchOrigin = Vector3.new(701, hrp.Position.Y + 4, hrp.Position.Z)
+		else
+			launchOrigin = hrp.Position + Vector3.new(-3, 4, 0)
+		end
 	else
 		launchOrigin = startPos + Vector3.new(0, 4, 0)
 	end
 
-	-- Trajectoire en "U" bien arquée : peakHeight augmenté (~10% de la
-	-- distance, plafonné à 60 studs) pour que le bloc décrive un vrai arc
-	-- visible et non plus une quasi-ligne droite. La distance et la durée
-	-- de vol sont inchangées : seul l'amplitude verticale change.
-	local flightDuration = math.clamp(FALL_DURATION + distance * 0.0009, 1.3, 3.5)
-	local peakHeight = math.clamp(distance * 0.10, 8, 60)
+	-- Vitesse CONSTANTE : la durée du vol est strictement proportionnelle à
+	-- la distance, comme un projectile réel (vitesse fixe en studs/s).
+	-- Aucun cap : un tir court (~50 studs) prend ~0.25s de vol, un tir long
+	-- (~2700 studs) prend ~12s. L'animation s'étire ou se contracte d'elle-même.
+	local FLIGHT_SPEED_STUDS_PER_SEC = 220
+	local flightDuration = math.max(0.5, distance / FLIGHT_SPEED_STUDS_PER_SEC)
+	-- Arc proportionnel à la distance, sans cap dur mais factor modéré pour
+	-- garder un "U" lisible sans monter trop haut. ~5% de la distance,
+	-- plancher 6 studs pour les courts tirs.
+	local peakHeight = math.max(6, distance * 0.05)
 
 	-- LandY : position Y où le centre du block doit être posé au sol. Le
 	-- client connait la taille réelle du block après son scale local.
@@ -1124,24 +1159,27 @@ local function runSequence(player, grade, fill)
 			local bb = Instance.new("BillboardGui")
 			bb.Name = "SpinRevealInfo"
 			bb.Adornee = currentDisplay.PrimaryPart
-			bb.Size = UDim2.fromOffset(260, 100)
+			-- Taille en STUDS (UDim2.new(scale=studs, 0, ...)) : le billboard a une
+			-- taille mondiale fixe qui s'adapte naturellement à la distance, donc
+			-- pas de "énorme" billboard quand on est proche.
+			bb.Size = UDim2.new(4, 0, 1.6, 0)
 			bb.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
 			bb.AlwaysOnTop = true
 			bb.LightInfluence = 0
-			bb.MaxDistance = 400
+			bb.MaxDistance = 200
 			bb.Parent = currentDisplay.PrimaryPart
 
 			local layout = Instance.new("UIListLayout")
 			layout.FillDirection = Enum.FillDirection.Vertical
 			layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 			layout.VerticalAlignment = Enum.VerticalAlignment.Top
-			layout.Padding = UDim.new(0, 2)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
 			layout.Parent = bb
 
-			local function mkLabel(text, color, size, order)
+			local function mkLabel(text, color, order)
 				local l = Instance.new("TextLabel")
 				l.BackgroundTransparency = 1
-				l.Size = UDim2.new(1, 0, 0, size)
+				l.Size = UDim2.new(1, 0, 1 / 3, 0)
 				l.Font = Enum.Font.GothamBlack
 				l.Text = text
 				l.TextColor3 = color
@@ -1151,10 +1189,10 @@ local function runSequence(player, grade, fill)
 				l.LayoutOrder = order
 				l.Parent = bb
 			end
-			mkLabel(finalInfo.FullName, Color3.fromRGB(255, 255, 255), 36, 1)
-			mkLabel(finalInfo.RarityType, finalInfo.RarityColor, 28, 2)
+			mkLabel(finalInfo.FullName, Color3.fromRGB(255, 255, 255), 1)
+			mkLabel(finalInfo.RarityType, finalInfo.RarityColor, 2)
 			mkLabel("$" .. BrainrotInfo.FormatShort(finalInfo.CashPerSecond) .. "/s",
-				Color3.fromRGB(120, 230, 120), 30, 3)
+				Color3.fromRGB(120, 230, 120), 3)
 		end
 	end
 
@@ -1168,8 +1206,11 @@ local function runSequence(player, grade, fill)
 		spinVfxCtx.attachment:Destroy()
 	end
 
-	-- 5) Reveal : on détruit le display temporaire pour spawner le "vrai"
-	-- brainrot contrôlable ci-dessous.
+	-- 5) Reveal : on détruit le display temporaire. La transformation
+	-- du joueur en brainrot se fait côté client (weld du mesh sur le HRP
+	-- du character) pour que les contrôles natifs (joystick mobile inclus)
+	-- fonctionnent. Le serveur n'a plus besoin de spawner un Model brainrot
+	-- séparé avec sa propre physique.
 	if currentDisplay then currentDisplay:Destroy() end
 	if spinMount.Parent then spinMount:Destroy() end
 
@@ -1185,8 +1226,6 @@ local function runSequence(player, grade, fill)
 	local revAtt = Instance.new("Attachment", revealFX)
 	local flash = Instance.new("ParticleEmitter")
 	flash.Parent = revAtt
-	-- Texture smoke ronde (intégrée) au lieu de 241876428 qui dessine des
-	-- rectangles étirés verticaux -> évite les "lignes" résiduelles.
 	flash.Texture = "rbxasset://textures/particles/smoke_main.dds"
 	flash.Lifetime = NumberRange.new(0.4, 0.8)
 	flash.Rate = 0
@@ -1198,194 +1237,79 @@ local function runSequence(player, grade, fill)
 	flash.RotSpeed = NumberRange.new(-180, 180)
 	flash:Emit(40)
 
-	-- Spawn le brainrot choisi à sa taille d'origine.
-	-- On le fait tomber depuis le ciel au-dessus de la position d'atterrissage :
-	-- la gravité l'amène au sol au moment même où le joueur prend le contrôle,
-	-- ce qui donne un effet "pop out" du lucky block.
-	local brainrot = finalTemplate:Clone()
-	brainrot.Name = "DunkBrainrot_" .. player.Name
-	flattenToPart(brainrot, nil)
-	local brPrimary = brainrot.PrimaryPart
-	if not brPrimary then
-		brainrot:Destroy()
-		cleanup()
-		return
+	-- Sauve la position d'origine du joueur (avant la séquence Dunk) pour
+	-- pouvoir le ramener à son spawn d'origine en cas de mort par la wave
+	-- (BrainrotLost). Sans ça, le joueur reste à impactPos.
+	local originalPlayerCFrame = nil
+	do
+		local _char = player.Character
+		local _hrp = _char and _char:FindFirstChild("HumanoidRootPart")
+		if _hrp then
+			originalPlayerCFrame = _hrp.CFrame
+		end
 	end
 
-	-- Calcule la taille réelle (bounding box) pour le placement au sol.
-	local _, brSize = brainrot:GetBoundingBox()
+	-- Téléporte le character du joueur à la position d'impact pour qu'il
+	-- démarre la phase de fuite à l'endroit où le brainrot est apparu (et
+	-- pas à son spawn d'origine après tout le mini-jeu Dunk).
+	local playerCharacter = player.Character
+	local playerHRP_Tp = playerCharacter and playerCharacter:FindFirstChild("HumanoidRootPart")
+	if playerHRP_Tp then
+		-- Léger offset Y pour ne pas spawner enfoncé dans le sol.
+		playerHRP_Tp.CFrame = CFrame.new(impactPos + Vector3.new(0, 3, 0))
+		playerHRP_Tp.AssemblyLinearVelocity = Vector3.zero
+		playerHRP_Tp.AssemblyAngularVelocity = Vector3.zero
+	end
 
-	-- Setup physique : primary = HRP (visible mesh), toutes autres parts weldées.
-	for _, d in ipairs(brainrot:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.Anchored = false
-			d.CanCollide = (d == brPrimary)
-			d.Massless = (d ~= brPrimary)
-			d.CollisionGroup = BRAINROT_COLLISION_GROUP
-			-- Élasticité 0 + friction modérée : empêche les rebonds au sol après
-			-- un saut. On garde une friction standard pour ne pas glisser.
-			-- PhysicalProperties(density, friction, elasticity, frictionWeight, elasticityWeight)
-			d.CustomPhysicalProperties = PhysicalProperties.new(1.0, 0.3, 0, 1, 10)
-			if d ~= brPrimary then
-				local wc = Instance.new("WeldConstraint")
-				wc.Part0 = brPrimary
-				wc.Part1 = d
-				wc.Parent = brPrimary
+	-- Met le character du joueur dans le collision group pour qu'il passe
+	-- à travers les BlockPart (comme l'ancien brainrot Model).
+	if playerCharacter then
+		for _, d in ipairs(playerCharacter:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.CollisionGroup = BRAINROT_COLLISION_GROUP
 			end
 		end
 	end
 
-	-- Renomme en HumanoidRootPart (requis par Humanoid).
-	brPrimary.Name = "HumanoidRootPart"
-	brainrot.PrimaryPart = brPrimary
-
-	-- BillboardGui Nom / Rarété / CPS au-dessus de la tête, créé AVANT que
-	-- le brainrot soit parenté au workspace pour qu'il soit visible dès la
-	-- première frame où le brainrot apparaît (sans gap entre la silhouette
-	-- qui disparaît et le vrai brainrot).
-	local brainrotInfoEarly = BrainrotInfo.GetInfo(finalTemplate.Name)
-	if brainrotInfoEarly then
-		local billboard = Instance.new("BillboardGui")
-		billboard.Name = "DunkBrainrotInfo"
-		billboard.Adornee = brPrimary
-		billboard.Size = UDim2.fromOffset(220, 90)
-		billboard.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
-		billboard.AlwaysOnTop = true
-		billboard.LightInfluence = 0
-		billboard.MaxDistance = 300
-		billboard.Parent = brPrimary
-
-		local layout = Instance.new("UIListLayout")
-		layout.FillDirection = Enum.FillDirection.Vertical
-		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-		layout.VerticalAlignment = Enum.VerticalAlignment.Top
-		layout.Padding = UDim.new(0, 2)
-		layout.Parent = billboard
-
-		local function mk(text, color, size, order)
-			local lbl = Instance.new("TextLabel")
-			lbl.BackgroundTransparency = 1
-			lbl.Size = UDim2.new(1, 0, 0, size)
-			lbl.Font = Enum.Font.GothamBold
-			lbl.Text = text
-			lbl.TextColor3 = color
-			lbl.TextScaled = true
-			lbl.TextStrokeTransparency = 0
-			lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
-			lbl.LayoutOrder = order
-			lbl.Parent = billboard
-		end
-		mk(brainrotInfoEarly.FullName, Color3.fromRGB(255, 255, 255), 32, 1)
-		mk(brainrotInfoEarly.RarityType, brainrotInfoEarly.RarityColor, 24, 2)
-		mk("$" .. BrainrotInfo.FormatShort(brainrotInfoEarly.CashPerSecond) .. "/s",
-			Color3.fromRGB(120, 230, 120), 26, 3)
-	end
-
-	-- Spawn au sol : mesure la BB après rotation et ajuste la position Y pour
-	-- que le bas touche exactement le sol, peu importe le modèle.
-	local originalPivotRot = finalTemplate:GetPivot() - finalTemplate:GetPivot().Position
-
-	-- Calcule la direction vers le PERSONNAGE DU JOUEUR (pas KickReady) pour
-	-- que le brainrot regarde son propriétaire dès qu'il apparaît. Fallback
-	-- sur KickReady si le character n'est pas dispo.
-	local kickReadyPart = getKickReady()
-	local playerHRP = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-	local lookTargetPos = (playerHRP and playerHRP.Position) or (kickReadyPart and kickReadyPart.Position) or impactPos
-	local yawRotation = CFrame.new()
-	do
-		local dirToTarget = Vector3.new(
-			lookTargetPos.X - impactPos.X,
-			0,
-			lookTargetPos.Z - impactPos.Z
-		)
-		if dirToTarget.Magnitude > 0.1 then
-			dirToTarget = dirToTarget.Unit
-			local yaw = math.atan2(-dirToTarget.X, -dirToTarget.Z)
-			yawRotation = CFrame.Angles(0, yaw, 0)
-		end
-	end
-
-	-- Placement initial : on applique le yaw AVANT la rotation native pour
-	-- faire tourner le brainrot autour de l'axe Y world (il reste debout mais
-	-- pointe vers KickReady).
-	brainrot:PivotTo(CFrame.new(impactPos) * yawRotation * originalPivotRot)
-
-	-- Correction Y : bas réel (monde) doit être à impactPos.Y.
-	local actualBottomY = getWorldMinY(brainrot)
-	local correction = impactPos.Y - actualBottomY
-	brainrot:PivotTo(brainrot:GetPivot() + Vector3.new(0, correction, 0))
-
-	brainrot.Parent = Workspace
-	table.insert(cleanupTasks, function() if brainrot.Parent then brainrot:Destroy() end end)
-
-	-- Ajoute un Humanoid avec paramètres fixes (walkspeed déterminé par le
-	-- SpeedLevel du joueur ; base 13, améliorable via le SpeedShop).
-	-- Bonus gamepass Speed12X : multiplie la vitesse par 1.2 si le joueur l'a.
+	-- Calcule la WalkSpeed cible (SpeedLevel + gamepass Speed12X) et l'applique
+	-- DIRECTEMENT côté serveur sur le Humanoid du character. Comme le Humanoid
+	-- est répliqué et que le character est network-owned par le client, le
+	-- joueur peut bouger immédiatement.
 	local speedLevelVal = player:FindFirstChild("SpeedLevel")
-	local playerSpeed = SpeedConfig.GetSpeedForLevel(speedLevelVal and speedLevelVal.Value or 0)
+	local targetWalkSpeed = SpeedConfig.GetSpeedForLevel(speedLevelVal and speedLevelVal.Value or 0)
 	local DataService = Loader.GetService("DataService")
 	if DataService and DataService.HasGamepass and DataService:HasGamepass(player, "Speed12X") then
-		playerSpeed = playerSpeed * GamepassConfig.SPEED_1_2X_MULT
+		targetWalkSpeed = targetWalkSpeed * GamepassConfig.SPEED_1_2X_MULT
 	end
-	local humanoid = Instance.new("Humanoid")
-	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	humanoid.WalkSpeed = playerSpeed
-	humanoid.UseJumpPower = true
-	humanoid.JumpPower = 55
-	humanoid.HipHeight = 0
-	humanoid.MaxHealth = math.huge
-	humanoid.Health = math.huge
-	humanoid.AutoRotate = true
-	humanoid.Parent = brainrot
-
-	-- Supprime l'AnimationController d'origine pour éviter les conflits (on utilise
-	-- le Animator sur le Humanoid).
-	local oldAC = brainrot:FindFirstChildOfClass("AnimationController")
-	if oldAC then oldAC:Destroy() end
-
-	-- Crée un Animator sous le Humanoid et charge l'animation Idle.
-	local animator = Instance.new("Animator")
-	animator.Parent = humanoid
-
-	local animsFolder = brainrot:FindFirstChild("Anims") or brainrot:FindFirstChild("Animations")
-	if animsFolder then
-		local idleAnim = animsFolder:FindFirstChild("Idle") or animsFolder:FindFirstChildWhichIsA("Animation")
-		if idleAnim and idleAnim:IsA("Animation") then
-			local track = animator:LoadAnimation(idleAnim)
-			track.Looped = true
-			track.Priority = Enum.AnimationPriority.Idle
-			track:Play()
+	if playerCharacter then
+		local hum = playerCharacter:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.WalkSpeed = targetWalkSpeed
+			hum.JumpPower = 55
+			hum.UseJumpPower = true
 		end
 	end
 
-	-- Donne le contrôle réseau au client. Roblox l'auto-assigne si la caméra
-	-- suit l'assembly. On utilise SetNetworkOwner pour la fluidité.
-	pcall(function()
-		brPrimary:SetNetworkOwner(player)
-	end)
-
-	-- Désactive la collision des BlockPart pendant que le joueur contrôle
-	-- le brainrot, pour qu'il puisse traverser le mur de vente. On restaure
-	-- l'état d'origine dans cleanup.
-	local blockParts = getBlockParts()
-	local originalCollideState = {}
-	for _, bp in ipairs(blockParts) do
-		originalCollideState[bp] = bp.CanCollide
-		bp.CanCollide = false
-	end
+	-- TRANSFORMATION CÔTÉ SERVEUR : weld le mesh brainrot sur le HRP du joueur
+	-- et cache son corps original. Tout est répliqué à tous les clients
+	-- automatiquement.
+	PlayerBrainrotTransform.Apply(player, finalTemplate.Name)
 	table.insert(cleanupTasks, function()
-		for bp, state in pairs(originalCollideState) do
-			if bp and bp.Parent then
-				bp.CanCollide = state
-			end
-		end
+		PlayerBrainrotTransform.Remove(player)
 	end)
 
-	-- Caméra : on passe le Humanoid comme CameraSubject via un RemoteEvent.
+	-- Notifie le client uniquement pour les ajustements UI/caméra (cache la
+	-- TopBar, repositionne la caméra, etc.). La transformation visuelle est
+	-- déjà faite par le serveur ci-dessus.
 	dunkSequenceEvent:FireClient(player, "BrainrotPicked", {
-		BrainrotPath = brainrot,
 		BrainrotName = finalTemplate.Name,
+		WalkSpeed = targetWalkSpeed,
+		JumpPower = 55,
 	})
+
+	-- HRP de référence pour les détections wave/KickReady : c'est le HRP
+	-- du character du joueur (qui est devenu le brainrot via weld).
+	local trackHRP = playerHRP_Tp
 
 
 	-- ===== WAVE CHASE =====
@@ -1499,7 +1423,9 @@ local function runSequence(player, grade, fill)
 		end
 
 		dunkSequenceEvent:FireClient(player, "WaveChase", {
-			BrainrotPath = brainrot,
+			BrainrotName = finalTemplate.Name,
+			WalkSpeed = targetWalkSpeed,
+			JumpPower = 55,
 			WaveDirection = fixedDir,
 			ChaseSpeed = getWaveChaseSpeed(waveRarity),
 			StopX = WAVE_STOP_X,
@@ -1513,33 +1439,42 @@ local function runSequence(player, grade, fill)
 		local chaseStartTime = os.clock() + WAVE_CHASE_START_DELAY
 		local chaseStartPos = waveMetrics.EndPos
 		local chaseSpeed = getWaveChaseSpeed(waveRarity)
-		local halfX = waveMetrics.WaveLengthX * 0.5
-		local halfZ = waveMetrics.WaveWidthZ * 0.5
+		-- Hitbox de la wave RESSERÉE par rapport au bounding box du modèle.
+		-- Le modèle inclut souvent des effets/éclats qui débordent la silhouette
+		-- visible. On prend 45% des dims (au lieu de 50%) pour ne déclencher
+		-- BrainrotLost que si la wave touche réellement le brainrot, pas son halo.
+		local halfX = waveMetrics.WaveLengthX * 0.45
+		local halfZ = waveMetrics.WaveWidthZ * 0.45
 		-- Axes locaux de la wave (orientée avec lookAt vers fixedDir) :
 		--   LookVector = fixedDir, RightVector = perp horizontal.
 		local rightDir = Vector3.new(-fixedDir.Z, 0, fixedDir.X) -- perp horizontal de fixedDir
 
 		waveChaseConn = RunService.Heartbeat:Connect(function()
 			if waveCaughtBrainrot then return end
-			if not brPrimary or not brPrimary.Parent then return end
+			-- On track le HRP du character du joueur (qui est devenu le brainrot
+			-- via le weld côté client). Si le character disparait (mort, leave),
+			-- on tente de le récupérer ; sinon on skip cette frame.
+			if not trackHRP or not trackHRP.Parent then
+				local char = player.Character
+				trackHRP = char and char:FindFirstChild("HumanoidRootPart")
+				if not trackHRP then return end
+			end
 
 			local elapsed = os.clock() - chaseStartTime
 			if elapsed < 0 then return end -- délai de démarrage : wave encore immobile
 			local travel = chaseSpeed * elapsed
 			local wavePos = chaseStartPos + fixedDir * travel
-			-- Clamp la position X de la wave à WAVE_STOP_X pour que la
-			-- détection de collision coïncide avec l'arrêt visuel côté client.
 			if fixedDir.X > 0 and wavePos.X > WAVE_STOP_X then
 				wavePos = Vector3.new(WAVE_STOP_X, wavePos.Y, wavePos.Z)
 			end
 
-			-- Vecteur du centre de la wave au brainrot.
-			local toBr = brPrimary.Position - wavePos
+			local toBr = trackHRP.Position - wavePos
 			local toBrHoriz = Vector3.new(toBr.X, 0, toBr.Z)
 
-			-- Projection sur les axes locaux (right et look = fixedDir).
 			local projRight = toBrHoriz:Dot(rightDir)
 			local projFwd   = toBrHoriz:Dot(fixedDir)
+
+			if projFwd > halfZ then return end
 
 			if math.abs(projRight) <= halfX and math.abs(projFwd) <= halfZ then
 				waveCaughtBrainrot = true
@@ -1553,18 +1488,38 @@ local function runSequence(player, grade, fill)
 	-- 6) Monitoring : quand le brainrot entre dans la zone KickReady (retour
 	-- au joueur), on lui donne le brainrot dans son inventaire et on rend
 	-- le contrôle à son character.
-	local kickReadyPart = getKickReady()
+	-- IMPORTANT : on ATTEND la fin de la phase WaveChase startDelay avant de
+	-- démarrer la détection. Sinon, si impactPos est proche/dans KickReady (tir
+	-- court), le monitorConn déclenche immédiatement crossed=true alors que
+	-- le brainrot est encore frozen à spawn et que le joueur n'a pas eu le
+	-- temps de courir, ce qui donne un BrainrotSold prématuré et un retour au
+	-- character au lieu d'être en mode brainrot.
+	local kickReadyPart2 = getKickReady()
 	local crossed = false
+	local monitorEnabled = false
 	local monitorConn
 	monitorConn = RunService.Heartbeat:Connect(function()
 		if crossed then return end
-		if not brPrimary or not brPrimary.Parent then return end
-		if not kickReadyPart or not kickReadyPart.Parent then return end
-		if isPointInsidePart(brPrimary.Position, kickReadyPart) then
+		if not monitorEnabled then return end
+		-- Re-récupère le HRP du character du joueur (peut changer si respawn).
+		if not trackHRP or not trackHRP.Parent then
+			local char = player.Character
+			trackHRP = char and char:FindFirstChild("HumanoidRootPart")
+			if not trackHRP then return end
+		end
+		if not kickReadyPart2 or not kickReadyPart2.Parent then return end
+		if isPointInsidePart(trackHRP.Position, kickReadyPart2) then
 			crossed = true
 		end
 	end)
 	table.insert(cleanupTasks, function() if monitorConn then monitorConn:Disconnect() end end)
+
+	-- Active la détection après la phase rise+showcase+startDelay : à ce moment,
+	-- le brainrot est dégelé et le joueur peut courir. Tout franchissement de
+	-- KickReady avant ce moment est ignoré.
+	task.delay(WAVE_CHASE_START_DELAY + 0.2, function()
+		monitorEnabled = true
+	end)
 
 	-- Attend que le brainrot franchisse la ligne (ou timeout, ou touché par wave).
 	local waitStart = os.clock()
@@ -1617,8 +1572,55 @@ local function runSequence(player, grade, fill)
 		end
 	end
 
-	-- Fin : cleanup brainrot + signal End.
-	if brainrot.Parent then brainrot:Destroy() end
+	-- Fin : revert la transformation (restaure le character visible et détruit
+	-- le visuel brainrot weldé). Restaure aussi le collision group du character.
+	PlayerBrainrotTransform.Remove(player)
+
+	local endChar = player.Character
+	if endChar then
+		for _, d in ipairs(endChar:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.CollisionGroup = "Default"
+			end
+		end
+		-- Restaure WalkSpeed/JumpPower par défaut.
+		-- Teleporte le joueur a sa position d'origine (avant le tir). Sans ca,
+		-- il reste plante a impactPos apres BrainrotLost / BrainrotSold.
+		local endHRP = endChar:FindFirstChild("HumanoidRootPart")
+		if endHRP and originalPlayerCFrame then
+			endHRP.CFrame = originalPlayerCFrame
+			endHRP.AssemblyLinearVelocity = Vector3.zero
+			endHRP.AssemblyAngularVelocity = Vector3.zero
+		end
+
+		local hum = endChar:FindFirstChildOfClass("Humanoid")
+		if hum then
+			local StarterPlayer = game:GetService("StarterPlayer")
+			local targetWS = StarterPlayer.CharacterWalkSpeed
+			local targetJP = StarterPlayer.CharacterJumpPower
+			local targetJH = StarterPlayer.CharacterJumpHeight
+			hum.WalkSpeed = targetWS
+			hum.JumpPower = targetJP
+			hum.JumpHeight = targetJH
+			pcall(function()
+				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Running, true)
+			end)
+			-- Force-overwrite WalkSpeed pendant 1s pour battre le client qui peut
+			-- avoir cache un WalkSpeed=0 et l'ecrire en même temps que nous.
+			local forceStart = os.clock()
+			local forceConn
+			forceConn = RunService.Heartbeat:Connect(function()
+				if not hum or not hum.Parent or os.clock() - forceStart > 1.0 then
+					if forceConn then forceConn:Disconnect() end
+					return
+				end
+				if hum.WalkSpeed < targetWS then hum.WalkSpeed = targetWS end
+				if hum.JumpPower < targetJP then hum.JumpPower = targetJP end
+			end)
+		end
+	end
 
 	-- Sécurité : si le clone n'a pas été cleanup avant, on le fait ici.
 	local runningClone = _G.DunkCurrentRunningClone
@@ -1691,6 +1693,7 @@ function DunkLuckyBlockService:Start()
 
 	Players.PlayerRemoving:Connect(function(player)
 		inSession[player.UserId] = nil
+		PlayerBrainrotTransform.Remove(player)
 	end)
 
 	print("[DunkLuckyBlockService] Prêt")

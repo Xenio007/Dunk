@@ -28,13 +28,23 @@ local RandomBrainrotService = Loader.CreateService({
 -- ============================================================
 local RANDOM_BRAINROT_PRODUCT_ID = 3591856301
 
--- Exposant de durete : weight = 1 / (CPS ^ HARDNESS).
-local HARDNESS = 1.5
+-- Poids par rarété. Tous les brainrots d'une même rarété ont strictement la
+-- même chance d'être tirés ; entre rarétés, la différence vient juste de ce
+-- multiplicateur. Plus le poids est haut, plus la rarété est probable.
+-- Ratio actuel (du plus probable au moins probable) :
+--   Legendary 100 / Mythic 50 / Secret 20 / God 8 / OG 3.
+local RARITY_WEIGHTS = {
+	Legendary = 100,
+	Mythic    = 50,
+	Secret    = 20,
+	God       = 8,
+	OG        = 3,
+}
 
 -- Rarétés autorisées pour le random brainrot. Tout ce qui est en dessous
--- (Common, Uncommon, Rare) ne peut PAS être tiré : la rarété minimum est Epic.
+-- (Common, Uncommon, Rare, Epic) ne peut PAS être tiré : la rarété minimum
+-- est Legendary.
 local ALLOWED_RARITIES = {
-	Epic      = true,
 	Legendary = true,
 	Mythic    = true,
 	Secret    = true,
@@ -106,43 +116,30 @@ local function pickRandomBrainrotForPlayer(player)
 		if BrainrotInfo and BrainrotInfo.IsExclusive and BrainrotInfo.IsExclusive(model.Name) then
 			return
 		end
-		local cps = 1
 		local rarityType
 		if BrainrotInfo and BrainrotInfo.GetInfo then
 			local info = BrainrotInfo.GetInfo(model.Name)
-			if info and info.CashPerSecond then
-				cps = math.max(1, info.CashPerSecond)
-			end
 			rarityType = info and info.RarityType
 		end
-		-- Filtre minimum Epic : on ne tire que dans les rarétés autorisées.
+		-- Filtre minimum Legendary : on ne tire que dans les rarétés autorisées.
 		if not ALLOWED_RARITIES[rarityType or ""] then
 			return
 		end
-		local weight = 1 / (cps ^ HARDNESS)
+		-- Poids = poids de la rarété. Tous les brainrots d'une même rarété ont
+		-- exactement le même poids, peu importe leur CPS individuel.
+		local weight = RARITY_WEIGHTS[rarityType] or 1
 		table.insert(templates, model)
 		table.insert(weights, weight)
 		totalWeight = totalWeight + weight
 	end
 
-	-- 1) Premier passage : essayer dans l'index découvert (variants compris).
-	for _, variantFolder in ipairs(brainrotsFolder:GetChildren()) do
-		if variantFolder:IsA("Folder") then
-			for _, m in ipairs(variantFolder:GetChildren()) do
-				tryAdd(m, true)
-			end
-		end
-	end
-
-	-- 2) Fallback : si l'index est vide (nouveau joueur), on tire dans la
-	-- totalité du pool Normal éligible. Comme ça l'achat est toujours honoré,
-	-- même pour quelqu'un qui n'a encore rien débloqué.
-	if #templates == 0 then
-		local normalFolder = brainrotsFolder:FindFirstChild("Normal")
-		if normalFolder then
-			for _, m in ipairs(normalFolder:GetChildren()) do
-				tryAdd(m, false)
-			end
+	-- Pas de filtrage par index : on tire dans TOUS les brainrots Normal de
+	-- rarété autorisée (Legendary+), peu importe que le joueur les ait déjà
+	-- découverts ou non. Ratio par rarété défini par RARITY_WEIGHTS.
+	local normalFolder = brainrotsFolder:FindFirstChild("Normal")
+	if normalFolder then
+		for _, m in ipairs(normalFolder:GetChildren()) do
+			tryAdd(m, false)
 		end
 	end
 
@@ -170,7 +167,7 @@ function RandomBrainrotService:HandlePurchase(player, productId)
 
 	local template = pickRandomBrainrotForPlayer(player)
 	if not template then
-		warn("[RandomBrainrotService] " .. player.Name .. " : aucun brainrot éligible (pool Epic+ vide?)")
+		warn("[RandomBrainrotService] " .. player.Name .. " : aucun brainrot éligible (pool Legendary+ vide?)")
 		return false
 	end
 
@@ -192,7 +189,7 @@ end
 
 function RandomBrainrotService:Init() end
 function RandomBrainrotService:Start()
-	print("[RandomBrainrotService] Prêt (productId=" .. RANDOM_BRAINROT_PRODUCT_ID .. ", hardness=" .. HARDNESS .. ", source=index)")
+	print("[RandomBrainrotService] Prêt (productId=" .. RANDOM_BRAINROT_PRODUCT_ID .. ", source=index, weights=per-rarity)")
 end
 
 return RandomBrainrotService

@@ -1,8 +1,10 @@
 --[[
 	BrainrotChatController
 	Écoute les messages du joueur dans le chat (TextChatService).
-	Quand le joueur envoie le nom d'un brainrot, demande au serveur de le placer
-	dans son inventaire.
+
+	  - "<nom>"           -> demande au serveur d'ajouter le brainrot dans son inventaire
+	  - "control <nom>"   -> demande au serveur de spawner ce brainrot et d'en prendre le contrôle
+	  - "/c <nom>"        -> idem (alias court)
 
 	Migration 1:1 de StarterPlayerScripts.BrainrotChatListener.
 ]]
@@ -20,6 +22,7 @@ local BrainrotChatController = Loader.CreateController({
 local knownNames = {}
 local brainrotsFolder
 local spawnEvent
+local controlEvent
 
 local function rebuildKnownNames()
 	table.clear(knownNames)
@@ -40,6 +43,20 @@ local function trim(s)
 	return s
 end
 
+-- Si le message commence par "control " / "/c " / "/control " (insensible à la
+-- casse), retourne le reste du message (le nom du brainrot à contrôler).
+-- Sinon retourne nil.
+local function parseControlPrefix(text)
+	if not text or text == "" then return nil end
+	local lower = text:lower()
+	for _, prefix in ipairs({ "/control ", "/c ", "control " }) do
+		if lower:sub(1, #prefix) == prefix then
+			return trim(text:sub(#prefix + 1))
+		end
+	end
+	return nil
+end
+
 local function resolveBrainrotName(msg)
 	local clean = trim(msg):lower()
 	if clean == "" then return nil end
@@ -56,11 +73,24 @@ end
 function BrainrotChatController:Start()
 	brainrotsFolder = ReplicatedStorage:WaitForChild("Brainrots")
 	spawnEvent = RemotesAPI.GetEvent("SpawnBrainrotEvent")
+	controlEvent = RemotesAPI.GetEvent("ChatControlBrainrotEvent")
 
 	rebuildKnownNames()
 
 	TextChatService.SendingMessage:Connect(function(message)
 		local text = message and message.Text or ""
+
+		-- Préfixe "control" / "/c" : prendre le contrôle d'un brainrot.
+		local controlName = parseControlPrefix(text)
+		if controlName and controlName ~= "" then
+			local brainrotName = resolveBrainrotName(controlName)
+			if brainrotName then
+				controlEvent:FireServer(brainrotName)
+			end
+			return
+		end
+
+		-- Sinon : nom direct -> ajout à l'inventaire (comportement historique).
 		local brainrotName = resolveBrainrotName(text)
 		if brainrotName then
 			spawnEvent:FireServer(brainrotName)

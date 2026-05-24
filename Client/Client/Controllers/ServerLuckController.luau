@@ -45,19 +45,11 @@ local iconFrame
 local iconCountdownLabel
 local iconMultiplierLabel
 
--- Retourne le step suivant dans l'échelle des multiplicateurs.
+-- Pas de cap côté config : chaque achat DOUBLE le multiplicateur. Le label
+-- "Max" hérité dans le shop est donc masqué en permanence.
 local function nextStep(current)
-	local steps = GamepassConfig.SERVER_LUCK_STEPS
-	if not steps or #steps == 0 then return current + 1 end
-	for i = 1, #steps - 1 do
-		if steps[i] == current then return steps[i + 1] end
-	end
-	return steps[#steps]
-end
-
-local function isMaxed(current)
-	local steps = GamepassConfig.SERVER_LUCK_STEPS
-	return steps and steps[#steps] == current
+	current = math.max(1, tonumber(current) or 1)
+	return current * 2
 end
 
 local function formatSeconds(total)
@@ -72,26 +64,23 @@ end
 local function refreshShopLabels()
 	if luck1Label then
 		luck1Label.Text = "x" .. tostring(currentMultiplier)
+		luck1Label.Visible = true
 	end
-	local next_ = nextStep(currentMultiplier)
 	if luck2Label then
-		luck2Label.Text = "x" .. tostring(next_)
+		luck2Label.Text = "x" .. tostring(nextStep(currentMultiplier))
+		luck2Label.Visible = true
 	end
-	local maxed = isMaxed(currentMultiplier)
-	-- Quand on est au max, on masque Luck1/Luck2/Arrow et on affiche le label
-	-- "Max". Sinon l'inverse.
-	if luck1Label then luck1Label.Visible = not maxed end
-	if luck2Label then luck2Label.Visible = not maxed end
-	if arrowImg then arrowImg.Visible = not maxed end
-	if maxLabel then maxLabel.Visible = maxed end
-	if buyLabel then
-		buyLabel.Text = maxed and "Maxed" or "Buy"
-	end
+	if arrowImg then arrowImg.Visible = true end
+	-- Le label "x6 (MAX)" était hardcodé dans le ScreenGui. Plus de cap ->
+	-- on le force masqué.
+	if maxLabel then maxLabel.Visible = false end
+	if buyLabel then buyLabel.Text = "Buy" end
 end
 
 local function wireShopButton()
-	if not buyButton then return end
-	if buyButton:FindFirstChild("_ServerLuckClickCatcher") then return end
+	if not serverLuckFrame and not buyButton then return end
+	local host = serverLuckFrame or buyButton
+	if host:FindFirstChild("_ServerLuckClickCatcher") then return end
 
 	local btn = Instance.new("TextButton")
 	btn.Name = "_ServerLuckClickCatcher"
@@ -100,12 +89,12 @@ local function wireShopButton()
 	btn.Size = UDim2.fromScale(1, 1)
 	btn.AutoButtonColor = false
 	btn.ZIndex = 100
-	btn.Parent = buyButton
+	-- On veut que TOUTE la frame ServerLuck soit cliquable, pas seulement le
+	-- bouton Buy. On parente donc au root de la frame plutôt qu'au Buy.
+	local target = serverLuckFrame or buyButton
+	btn.Parent = target
 
 	btn.MouseButton1Click:Connect(function()
-		if isMaxed(currentMultiplier) then
-			return -- déjà au max, clic ignoré
-		end
 		local productId = GamepassConfig.PRODUCTS.SERVER_LUCK
 		if not productId or productId <= 0 then
 			warn("[ServerLuckController] SERVER_LUCK productId non configuré")

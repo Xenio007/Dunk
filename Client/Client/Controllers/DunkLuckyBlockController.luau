@@ -23,6 +23,7 @@ local Workspace = game:GetService("Workspace")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
+local VFXPlayer = require(ReplicatedStorage.Shared:WaitForChild("VFXPlayer"))
 
 local DunkLuckyBlockController = Loader.CreateController({
 	Name = "DunkLuckyBlockController",
@@ -34,6 +35,7 @@ local LAND_SOUND_ID     = "rbxassetid://138533090376585" -- impact au sol
 local ROLL_TICK_SOUND_ID = "rbxassetid://156286438"      -- tick à chaque brainrot affiché pendant le roll
 local WAVE_SOUND_ID     = "rbxassetid://119576268904309" -- ambiance pendant l'animation de la wave
 local CHASE_SOUND_ID    = "rbxassetid://1847683499"      -- ambiance pendant la poursuite (WaveChase -> arrivée/touché)
+local RARITY_CHANGE_SOUND_ID = "rbxassetid://6079105785"  -- joue à chaque changement de skin du Lucky Block en vol
 
 -- Helper : joue un son one-shot à la position donnée (3D) ou globalement (2D).
 local SoundService = game:GetService("SoundService")
@@ -47,6 +49,30 @@ local function playSound2D(id, volume)
 	s:Play()
 	s.Ended:Once(function() s:Destroy() end)
 	Debris:AddItem(s, math.max(s.TimeLength + 0.5, 8))
+	return s
+end
+
+-- Helper : joue le RarityChange sound pour un swap de skin du Lucky Block, avec
+-- un PitchShiftSoundEffect dont l'octave varie légèrement à chaque swap pour
+-- donner un effet musical "qui monte" (anticipation roulette). Le swapIndex
+-- commence à 0 et est incrémenté par chaque appel à worldXToRarity → swap.
+local function playRarityChangeSound(swapIndex)
+	local s = Instance.new("Sound")
+	s.SoundId = RARITY_CHANGE_SOUND_ID
+	s.Volume = 0.7
+	s.Parent = SoundService
+
+	local pitch = Instance.new("PitchShiftSoundEffect")
+	-- Step d'environ un semi-ton (~5.95%). 8 changements possibles max sur un
+	-- vol → octave maximum ~1.42, qui reste dans la range valide [0.5; 2].
+	pitch.Octave = math.clamp(1 + swapIndex * 0.06, 0.5, 2)
+	pitch.Priority = 0
+	pitch.Enabled = true
+	pitch.Parent = s
+
+	s:Play()
+	s.Ended:Once(function() s:Destroy() end)
+	Debris:AddItem(s, math.max(s.TimeLength + 0.5, 4))
 	return s
 end
 
@@ -125,16 +151,67 @@ local function spawnLocalImpactFX(position)
 	Debris:AddItem(ring, 0.8)
 end
 
--- ID sonore joué au moment où le brainrot franchit KickReady (confetti + flash).
+-- ID sonore (générique) joué au moment où le brainrot franchit KickReady
+-- (utilisé en fallback si le brainrot n'a pas de sound configuré).
 local SOLD_SOUND_ID = "rbxassetid://109081723292068"
+
+-- Cache du module BrainrotsModule (lookup paresseux : peut ne pas exister
+-- en dev). Contient les SoundIds par brainrot.
+local _brainrotsModule
+local function getBrainrotsModule()
+	if _brainrotsModule ~= nil then return _brainrotsModule end
+	local m = ReplicatedStorage:FindFirstChild("BrainrotsModule")
+	if m then
+		local ok, mod = pcall(require, m)
+		if ok then _brainrotsModule = mod else _brainrotsModule = false end
+	else
+		_brainrotsModule = false
+	end
+	return _brainrotsModule
+end
+
+-- Récupère l'asset id du Sound spécifique du brainrot via BrainrotsModule.
+-- Le module a une table {[name] = { Sound = <number>, ... }}. Match exact
+-- d'abord, puis insensible à la casse.
+local function getBrainrotSoundId(brainrotName)
+	if not brainrotName or brainrotName == "" then return nil end
+	local mod = getBrainrotsModule()
+	if not mod or type(mod) ~= "table" then return nil end
+
+	local entry = mod[brainrotName]
+	if not entry then
+		local target = brainrotName:lower()
+		for name, e in pairs(mod) do
+			if type(name) == "string" and name:lower() == target then
+				entry = e
+				break
+			end
+		end
+	end
+	if type(entry) ~= "table" then return nil end
+
+	-- Le module utilise parfois "Sound" (PascalCase) et parfois "sound".
+	local id = entry.Sound or entry.sound
+	if type(id) == "number" then
+		return "rbxassetid://" .. tostring(id)
+	end
+	return nil
+end
 
 -- Anim "sold" : flash blanc plein écran + confetti qui tombent depuis le
 -- haut. Joué quand le brainrot passe la KickReady et revient au joueur.
-local function playSoldFeedback(player)
+local function playSoldFeedback(player, brainrotName)
 	local playerGui = player:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return end
 
-	playSound2D(SOLD_SOUND_ID, 1.0)
+	-- Priorité : son spécifique du brainrot (BrainrotsModule[<Name>].Sound).
+	-- Sinon fallback sur le SOLD_SOUND_ID générique.
+	local soundId = getBrainrotSoundId(brainrotName)
+	if soundId then
+		playSound2D(soundId, 1.0)
+	else
+		playSound2D(SOLD_SOUND_ID, 1.0)
+	end
 
 	-- Flash blanc : ScreenGui plein écran qui apparaît à opacité max, puis
 	-- fade out rapidement. Couche la plus haute (DisplayOrder élevé).
@@ -366,22 +443,127 @@ function DunkLuckyBlockController:Start()
 		return zoneKeyframes[#zoneKeyframes][2]
 	end
 
+	-- ===== SKIN DU LUCKY BLOCK PAR ZONE =====
+	-- Pendant le vol, le skin du Lucky Block change selon la zone de rareté
+	-- traversée. Les modèles vivent dans ReplicatedStorage.LUCKBLOCK et leur
+	-- nom ne suit pas exactement la rareté interne (ex: Uncommun != Uncommon).
+	local RARITY_TO_LUCKBLOCK_NAME = {
+		Common    = "Basic",
+		Uncommon  = "Uncommun",
+		Rare      = "Rare",
+		Epic      = "Epic",
+		Legendary = "Legendary",
+		Mythic    = "Mythic",
+		Secret    = "Secret",
+		God       = "God",
+		OG        = "Og",
+	}
+
+	-- 10 keyframes définissent les bordures entre les 9 zones, ordonnées du
+	-- plus proche du spawn (Common) au plus loin (OG). Segment[i] couvre
+	-- l'intervalle [zoneKeyframes[i+1].x, zoneKeyframes[i].x].
+	local ZONE_NAMES_ORDER = {
+		"Common", "Uncommon", "Rare", "Epic",
+		"Legendary", "Mythic", "Secret", "God", "OG",
+	}
+
+	local function worldXToRarity(wx)
+		if wx >= zoneKeyframes[1][1] then return ZONE_NAMES_ORDER[1] end
+		if wx <= zoneKeyframes[#zoneKeyframes][1] then
+			return ZONE_NAMES_ORDER[#ZONE_NAMES_ORDER]
+		end
+		for i = 1, #zoneKeyframes - 1 do
+			if wx <= zoneKeyframes[i][1] and wx >= zoneKeyframes[i + 1][1] then
+				return ZONE_NAMES_ORDER[i]
+			end
+		end
+		return ZONE_NAMES_ORDER[#ZONE_NAMES_ORDER]
+	end
+
+	local function getLuckBlockTemplate(rarity)
+		local folder = ReplicatedStorage:FindFirstChild("LUCKBLOCK")
+		if not folder then return nil end
+		local name = RARITY_TO_LUCKBLOCK_NAME[rarity] or "Basic"
+		return folder:FindFirstChild(name) or folder:FindFirstChild("Basic")
+	end
+
+	-- ===== CACHE DES SKINS DE LUCKY BLOCK =====
+	-- Pour eliminer les saccades dues au cloning runtime a chaque changement
+	-- de zone pendant le vol, on preclone TOUS les skins une fois au demarrage
+	-- du controller. Pendant le vol, on ne fait que teleporter les clones (pas
+	-- de Clone/ScaleTo/iteration runtime sur le frame de rendu).
+	local skinCache = {} -- [rarityName] = Model (clone setup, hors-ecran)
+	local skinCacheReady = false
+
+	local function isCachedSkin(model)
+		if not model then return false end
+		for _, c in pairs(skinCache) do
+			if c == model then return true end
+		end
+		return false
+	end
+
+	local function hideAllCachedSkins()
+		for _, c in pairs(skinCache) do
+			if c and c.Parent then
+				c:PivotTo(CFrame.new(0, -100000, 0))
+			end
+		end
+	end
+
+	-- Construit un clone du Lucky Block prêt pour le vol :
+	-- pivot recentré, scale x2, parts ancrées, no-collision/no-query/no-touch.
+	local function setupLocalBlockClone(template)
+		local clone = template:Clone()
+		clone.Name = "LocalDunkLuckyBlock"
+		if not clone.PrimaryPart then
+			for _, d in ipairs(clone:GetDescendants()) do
+				if d:IsA("BasePart") then
+					clone.PrimaryPart = d
+					break
+				end
+			end
+		end
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.PivotOffset = CFrame.new()
+			end
+		end
+		local currentScale = clone:GetScale()
+		clone:ScaleTo(currentScale * 2)
+		clone.WorldPivot = clone:GetBoundingBox()
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.CanQuery = false
+				d.CanTouch = false
+			end
+		end
+		return clone
+	end
+
 	local dunkSequenceEvent = RemotesAPI.GetEvent("DunkSequenceEvent")
 
 	local StarterGui = game:GetService("StarterGui")
 
 	-- Active/désactive la possibilité de se reset (R ou bouton menu).
+	-- IMPORTANT : par design on ne ré-active PLUS le reset (jamais re-enable)
+	-- pour interdire au joueur de respawn manuellement. Le paramètre `enabled`
+	-- est ignoré quand il vaut true : on garde toujours false.
 	local function setResetEnabled(enabled)
+		local _ = enabled
 		pcall(function()
-			StarterGui:SetCore("ResetButtonCallback", enabled)
+			StarterGui:SetCore("ResetButtonCallback", false)
 		end)
 	end
 
-	-- Le preload des LuckyBlocks et brainrots Normal est désormais centralisé
-	-- dans ReplicatedStorage.Shared.AssetPreloader (déclenché par le
-	-- LoadingScreen au join). On fait juste un warmup GPU local : un clone
-	-- caché du LuckyBlock Basic pour forcer la mise en cache de rendu, qui
-	-- est distincte du téléchargement des données effectué par PreloadAsync.
+	-- Le preload des LuckyBlocks et brainrots Normal est desormais centralise
+	-- dans ReplicatedStorage.Shared.AssetPreloader (declenche par le
+	-- LoadingScreen au join). Apres le preload, on preclone TOUS les skins de
+	-- Lucky Block (un par rarete) et on les garde hors-ecran. Au moment d'un
+	-- swap pendant le vol, on teleporte le clone deja pret au lieu de cloner
+	-- un nouveau modele : zero saccade.
 	task.spawn(function()
 		local sharedFolder = ReplicatedStorage:FindFirstChild("Shared")
 		local preloaderModule = sharedFolder and sharedFolder:FindFirstChild("AssetPreloader")
@@ -390,36 +572,209 @@ function DunkLuckyBlockController:Start()
 			AssetPreloader.WaitForEssential()
 		end
 
-		local luckyBlocksFolder = ReplicatedStorage:WaitForChild("LuckyBlocks", 30)
-		local basic = luckyBlocksFolder and luckyBlocksFolder:FindFirstChild("Basic")
-		if not basic then return end
-
-		-- Warmup clone caché pour forcer le chargement des meshes dans le cache
-		-- de rendu (PreloadAsync charge les données mais pas forcément le rendu GPU).
-		local warmup = basic:Clone()
-		for _, d in ipairs(warmup:GetDescendants()) do
-			if d:IsA("BasePart") then
-				d.Transparency = 1
-				d.Anchored = true
-				d.CanCollide = false
-				d.CanQuery = false
-				d.CanTouch = false
+		-- Preclone chaque skin une fois pour la session entiere. setupLocalBlockClone
+		-- applique les transforms necessaires (PivotOffset, ScaleTo x2, anchor,
+		-- no-collision). On yield (task.wait) entre chaque pour ne pas figer
+		-- une seule frame avec 9 ScaleTo successifs.
+		for _, rarity in ipairs(ZONE_NAMES_ORDER) do
+			if not skinCache[rarity] then
+				local template = getLuckBlockTemplate(rarity)
+				if template then
+					local clone = setupLocalBlockClone(template)
+					clone.Name = "DunkSkin_" .. rarity
+					clone:PivotTo(CFrame.new(0, -100000, 0))
+					clone.Parent = Workspace
+					skinCache[rarity] = clone
+				end
 			end
+			task.wait()
 		end
-		warmup:PivotTo(CFrame.new(0, -10000, 0))
-		warmup.Parent = Workspace
-		task.wait(2)
-		warmup:Destroy()
+		skinCacheReady = true
 	end)
 
-	local currentBrainrot = nil
-	local inputConn = nil
-	local controlBindings = {}
+	-- ===== TRANSFORMATION EN BRAINROT (mobile-friendly) =====
+	-- Au lieu de spawner un brainrot Model séparé avec sa propre physique et
+	-- des inputs custom, on transforme le character du joueur en brainrot :
+	-- on weld visuellement le mesh du brainrot sur son HRP, on cache son corps,
+	-- et il se déplace avec ses contrôles natifs (joystick mobile inclus).
+	local attachedBrainrotVisual = nil -- Model du brainrot weldé au character
+	local frozenStateConn = nil -- Heartbeat qui maintient WalkSpeed=0 quand frozen
+	local savedCharacterStats = nil -- {WalkSpeed, JumpPower, JumpHeight} avant transformation
+	local currentBrainrotWalkSpeed = nil -- vitesse cible pendant la transformation
 	local waveSound = nil -- son loópé pendant l'animation de la wave (rise)
 	local chaseSound = nil -- son loópé pendant la poursuite (WaveChase -> End/Lost)
 	local localWaveModel = nil -- modèle de wave cloné localement (client only)
 	local localWaveRiseConn = nil -- RenderStepped pour la montée
 	local localWaveChaseConn = nil -- RenderStepped pour le chase
+
+	-- Calcule le Y minimum réel d'un modèle dans le monde (itère les 8 coins
+	-- de chaque BasePart). Plus fiable que GetBoundingBox() pour les modeles
+	-- multi-meshes.
+	local function getWorldMinY(model)
+		local minY = math.huge
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				local cf = d.CFrame
+				local hx, hy, hz = d.Size.X * 0.5, d.Size.Y * 0.5, d.Size.Z * 0.5
+				for sx = -1, 1, 2 do
+					for sy = -1, 1, 2 do
+						for sz = -1, 1, 2 do
+							local wp = cf * Vector3.new(sx * hx, sy * hy, sz * hz)
+							if wp.Y < minY then minY = wp.Y end
+						end
+					end
+				end
+			end
+		end
+		if minY == math.huge then
+			return model:GetPivot().Position.Y
+		end
+		return minY
+	end
+
+	-- Cherche un brainrot template par son nom dans ReplicatedStorage.Brainrots.
+	-- Match exact d'abord, puis insensible à la casse en fallback.
+	local function findBrainrotTemplate(name)
+		local brainrotsFolder = ReplicatedStorage:FindFirstChild("Brainrots")
+		if not brainrotsFolder then return nil end
+		for _, rarityFolder in ipairs(brainrotsFolder:GetChildren()) do
+			if rarityFolder:IsA("Folder") then
+				local found = rarityFolder:FindFirstChild(name)
+				if found and found:IsA("Model") then return found end
+			end
+		end
+		-- Fallback insensible à la casse.
+		local target = name:lower()
+		for _, rarityFolder in ipairs(brainrotsFolder:GetChildren()) do
+			if rarityFolder:IsA("Folder") then
+				for _, m in ipairs(rarityFolder:GetChildren()) do
+					if m:IsA("Model") and m.Name:lower() == target then
+						return m
+					end
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Calcule le bas réel du character (le plus bas point monde de toutes ses
+	-- BaseParts). Sert à aligner le bas du mesh brainrot sur les pieds du character.
+	local function getCharacterBottomY(character)
+		local minY = math.huge
+		for _, d in ipairs(character:GetDescendants()) do
+			if d:IsA("BasePart") then
+				local bottom = d.Position.Y - d.Size.Y * 0.5
+				if bottom < minY then minY = bottom end
+			end
+		end
+		if minY == math.huge then return character:GetPivot().Position.Y end
+		return minY
+	end
+
+	-- Attache un mesh brainrot (clone du template) au character du joueur via
+	-- un WeldConstraint sur le HRP. Le visuel suit toutes les transforms du
+	-- character (marche, saut, etc.) sans physique séparée. Y offset calculé
+	-- pour que le bas du mesh tombe pile sur les pieds du character.
+	local function attachBrainrotVisualToCharacter(brainrotName)
+		local template = findBrainrotTemplate(brainrotName)
+		if not template then return nil end
+
+		local character = player.Character
+		if not character then return nil end
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if not hrp then return nil end
+
+		local visual = template:Clone()
+		visual.Name = "PlayerBrainrotVisual"
+
+		-- PrimaryPart fallback.
+		if not visual.PrimaryPart then
+			for _, d in ipairs(visual:GetDescendants()) do
+				if d:IsA("BasePart") then
+					visual.PrimaryPart = d
+					break
+				end
+			end
+		end
+		local visualPrimary = visual.PrimaryPart
+		if not visualPrimary then visual:Destroy(); return nil end
+
+		-- Strip Humanoid / AnimationController / scripts existants : on n'a
+		-- besoin que du visuel. On recrée un AnimationController plus bas pour
+		-- jouer l'idle.
+		local oldHum = visual:FindFirstChildOfClass("Humanoid")
+		if oldHum then oldHum:Destroy() end
+		local oldAC = visual:FindFirstChildOfClass("AnimationController")
+		if oldAC then oldAC:Destroy() end
+		for _, d in ipairs(visual:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") then
+				d:Destroy()
+			end
+		end
+
+		-- Parts setup : non-ancrées, no-collide, massless. On laisse les Motor6D
+		-- internes intacts pour que les anims puissent les bouger.
+		for _, d in ipairs(visual:GetDescendants()) do
+			if d:IsA("BasePart") then
+				d.Anchored = false
+				d.CanCollide = false
+				d.CanQuery = false
+				d.CanTouch = false
+				d.Massless = true
+			end
+		end
+
+		-- Place le visuel sur le HRP pour mesurer le bas réel du mesh.
+		visual:PivotTo(hrp.CFrame)
+		local visualBottomY = getWorldMinY(visual)
+		local charBottomY = getCharacterBottomY(character)
+		-- Translate le mesh pour que son bas tombe pile sur les pieds.
+		local yOffset = charBottomY - visualBottomY
+		visual:PivotTo(hrp.CFrame * CFrame.new(0, yOffset, 0))
+
+		-- Weld TOUTES les parts non-primaires à la primaire AVANT de welder la
+		-- primaire au HRP. Sans ça, les parts orphelines (la plupart des brainrots
+		-- sont des collections de parts SANS Motor6D ni Welds entre eux) tombent
+		-- au sol dès qu'on parente au Workspace : seule la primaire suit le HRP,
+		-- le reste se détache. Même logique que l'ancien setupControllableBrainrot.
+		for _, d in ipairs(visual:GetDescendants()) do
+			if d:IsA("BasePart") and d ~= visualPrimary then
+				local wc = Instance.new("WeldConstraint")
+				wc.Part0 = visualPrimary
+				wc.Part1 = d
+				wc.Parent = visualPrimary
+			end
+		end
+
+		-- Weld la PrimaryPart du visuel au HRP du character. WeldConstraint
+		-- capture la position relative au moment de la création : le yOffset
+		-- calculé ci-dessus est donc "figé" et le mesh suivra le HRP partout.
+		local weld = Instance.new("WeldConstraint")
+		weld.Name = "BrainrotVisualWeld"
+		weld.Part0 = hrp
+		weld.Part1 = visualPrimary
+		weld.Parent = visualPrimary
+
+		-- Animator : joue l'idle du brainrot en boucle si dispo.
+		local ac = Instance.new("AnimationController")
+		ac.Parent = visual
+		local animator = Instance.new("Animator")
+		animator.Parent = ac
+
+		local animsFolder = visual:FindFirstChild("Anims") or visual:FindFirstChild("Animations")
+		if animsFolder then
+			local idleAnim = animsFolder:FindFirstChild("Idle") or animsFolder:FindFirstChildWhichIsA("Animation")
+			if idleAnim and idleAnim:IsA("Animation") then
+				local track = animator:LoadAnimation(idleAnim)
+				track.Looped = true
+				track.Priority = Enum.AnimationPriority.Idle
+				track:Play()
+			end
+		end
+
+		visual.Parent = Workspace
+		return visual
+	end
 
 	-- ===== MASQUAGE DU CHARACTER PENDANT LA PHASE BRAINROT =====
 	-- Quand le joueur contrôle le brainrot, son character d'origine reste
@@ -467,17 +822,17 @@ function DunkLuckyBlockController:Start()
 	end
 
 	local function releaseControl()
-		for _, c in ipairs(controlBindings) do
-			if typeof(c) == "RBXScriptConnection" then
-				c:Disconnect()
-			end
+		-- Stoppe la boucle de freeze si elle tourne.
+		if frozenStateConn then
+			frozenStateConn:Disconnect()
+			frozenStateConn = nil
 		end
-		table.clear(controlBindings)
-		if inputConn then
-			inputConn:Disconnect()
-			inputConn = nil
-		end
-		currentBrainrot = nil
+
+		-- Le visuel brainrot est détruit par le serveur (PlayerBrainrotTransform.Remove).
+		-- Le client efface juste sa référence locale.
+		attachedBrainrotVisual = nil
+		currentBrainrotWalkSpeed = nil
+
 		camera.CameraType = Enum.CameraType.Custom
 		local character = player.Character
 		local h = character and character:FindFirstChildOfClass("Humanoid")
@@ -486,20 +841,21 @@ function DunkLuckyBlockController:Start()
 			camera.CameraSubject = h
 			h:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 			h:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+			-- Force WalkSpeed > 0 immédiatement, car le freezeStateConn a pu
+			-- l'ecrire à 0 et le client garde l'autorité sur son Humanoid (network
+			-- ownership). Sans ça, le joueur reste figé même après la séquence.
+			local StarterPlayer = game:GetService("StarterPlayer")
+			h.WalkSpeed = StarterPlayer.CharacterWalkSpeed
+			h.JumpPower = StarterPlayer.CharacterJumpPower
+			h.JumpHeight = StarterPlayer.CharacterJumpHeight
 		end
 
 		-- ===== SÉCURITÉ ANTI-BUG REPRISE DE CONTRÔLE =====
-		-- Bug observé : après la séquence dunk, quand le joueur reprend le contrôle
-		-- de son perso, il meurt instantanément. Cause probable : vélocité
-		-- résiduelle du HRP (tween dunk anim) + fall damage sur la chute. On
-		-- zérote la vélocité et on protège les dégâts pendant 1.5s.
 		if playerHRP then
 			playerHRP.AssemblyLinearVelocity = Vector3.zero
 			playerHRP.AssemblyAngularVelocity = Vector3.zero
 		end
 		if h then
-			-- Bloque tout dégât pendant 1.5s : on réenregistre Health à sa valeur
-			-- max chaque frame. Suffit pour absorber n'importe quel fall damage.
 			local protectStart = os.clock()
 			local protectConn
 			protectConn = RunService.Heartbeat:Connect(function()
@@ -515,175 +871,98 @@ function DunkLuckyBlockController:Start()
 			end)
 		end
 
-		-- Réactive les contrôles du PlayerModule.
-		pcall(function()
-			local PlayerScripts = player:WaitForChild("PlayerScripts")
-			local PlayerModule = require(PlayerScripts:WaitForChild("PlayerModule"))
-			local controls = PlayerModule:GetControls()
-			controls:Enable()
-		end)
+		savedCharacterStats = nil
 	end
 
-	local function takeControl(brainrot)
-		if not brainrot or not brainrot.Parent then return end
-		local humanoid = brainrot:FindFirstChildOfClass("Humanoid")
-		local hrp = brainrot:FindFirstChild("HumanoidRootPart")
+	local function takeControl(brainrotName, walkSpeed, jumpPower)
+		local character = player.Character
+		if not character then return end
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		local hrp = character:FindFirstChild("HumanoidRootPart")
 		if not humanoid or not hrp then return end
 
-		currentBrainrot = brainrot
+		-- Cleanup au cas où une transformation précédente serait encore active
+		-- (cas du fallback dans WaveChase si BrainrotPicked a été raté).
+		if frozenStateConn then
+			frozenStateConn:Disconnect()
+			frozenStateConn = nil
+		end
 
-		-- Caméra sur le brainrot.
+		-- Sauvegarde les stats originales du character pour restauration au End.
+		savedCharacterStats = {
+			WalkSpeed = humanoid.WalkSpeed,
+			JumpPower = humanoid.JumpPower,
+			JumpHeight = humanoid.JumpHeight,
+		}
+
+		-- Le serveur a déjà weldé le visuel brainrot sur le character et réglé
+		-- la WalkSpeed correctement côté serveur. Le client n'a plus besoin de
+		-- toucher à humanoid.WalkSpeed (network ownership = client peut quand
+		-- même override, mais on évite). On stocke juste la cible pour le
+		-- mécanisme de freeze pendant la wave.
+		local targetSpeed = tonumber(walkSpeed)
+		if not targetSpeed or targetSpeed <= 0 then
+			targetSpeed = humanoid.WalkSpeed
+			if targetSpeed <= 0 then targetSpeed = 16 end
+		end
+		local targetJump = tonumber(jumpPower)
+		if not targetJump or targetJump <= 0 then
+			targetJump = 55
+		end
+		currentBrainrotWalkSpeed = targetSpeed
+
+		-- Force la WalkSpeed/JumpPower côté client. Même si le serveur les a
+		-- déjà réglées, le client a network ownership sur son Humanoid et son
+		-- cache local peut avoir un WalkSpeed=0 résiduel (depuis le précédent
+		-- freezeStateConn) qui écrase la valeur serveur.
+		humanoid.WalkSpeed = targetSpeed
+		humanoid.JumpPower = targetJump
+		humanoid.UseJumpPower = true
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Running, true)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+
+		-- Marker pour les autres logiques (freeze pendant wave, releaseControl).
+		-- On utilise une référence vers le visuel server-spawned (s'il existe)
+		-- ou un marker truthy pour indiquer qu'une transformation est active.
+		attachedBrainrotVisual = character:FindFirstChild("PlayerBrainrotVisual") or true
+
+		-- Caméra : reste sur l'humanoid du character (qui devient le brainrot).
+		-- Roblox suit nativement le character donc le joystick mobile / clavier /
+		-- gamepad fonctionnent tous sans rien réinventer.
 		camera.CameraType = Enum.CameraType.Custom
 		camera.CameraSubject = humanoid
 
-		pcall(function()
-			local character = player.Character
-			local playerHRP = character and character:FindFirstChild("HumanoidRootPart")
-			if playerHRP then
-				-- Le brainrot doit regarder vers le personnage du joueur (pour savoir
-				-- où le ramener). On oriente donc la caméra derrière le brainrot,
-				-- face au character.
-				local targetDir = (playerHRP.Position - hrp.Position)
-				targetDir = Vector3.new(targetDir.X, 0, targetDir.Z)
-				if targetDir.Magnitude > 0.1 then
-					local lookDir = targetDir.Unit
-					local camOffset = -lookDir * 14 + Vector3.new(0, 5, 0)
-					camera.CFrame = CFrame.new(hrp.Position + camOffset, hrp.Position)
-				end
+		-- Heartbeat de freeze : tant que _G.DunkBrainrotFrozen est true (pendant
+		-- WaveRise + showcase), on remet WalkSpeed=0 et on bloque le saut. Dès
+		-- que le flag retombe, on rétablit WalkSpeed=targetSpeed pour relancer
+		-- la fuite.
+		if frozenStateConn then frozenStateConn:Disconnect() end
+		local wasFrozen = false
+		frozenStateConn = RunService.Heartbeat:Connect(function()
+			if not attachedBrainrotVisual then return end
+			local char = player.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not hum then return end
+			local frozen = _G.DunkBrainrotFrozen == true
+			if frozen and not wasFrozen then
+				hum.WalkSpeed = 0
+				hum.JumpPower = 0
+				hum.JumpHeight = 0
+				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+				wasFrozen = true
+			elseif not frozen and wasFrozen then
+				hum.WalkSpeed = currentBrainrotWalkSpeed or hum.WalkSpeed
+				hum.JumpPower = targetJump
+				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+				wasFrozen = false
 			end
 		end)
-
-		-- Joue l'animation Idle du brainrot en boucle si elle existe.
-		local animator = humanoid:FindFirstChildOfClass("Animator")
-		if not animator then
-			animator = Instance.new("Animator")
-			animator.Parent = humanoid
-		end
-		local animsFolder = brainrot:FindFirstChild("Anims") or brainrot:FindFirstChild("Animations")
-		if animsFolder then
-			local idleAnim = animsFolder:FindFirstChild("Idle") or animsFolder:FindFirstChildWhichIsA("Animation")
-			if idleAnim and idleAnim:IsA("Animation") then
-				local track = animator:LoadAnimation(idleAnim)
-				track.Looped = true
-				track.Priority = Enum.AnimationPriority.Idle
-				track:Play()
-			end
-		end
-
-		-- Désactive complètement les contrôles du character (y compris saut)
-		-- via PlayerModule pendant qu'on contrôle le brainrot.
-		pcall(function()
-			local PlayerScripts = player:WaitForChild("PlayerScripts")
-			local PlayerModule = require(PlayerScripts:WaitForChild("PlayerModule"))
-			local controls = PlayerModule:GetControls()
-			controls:Disable()
-		end)
-
-		-- Freeze le character du joueur : vitesse nulle et saut désactivé pour
-		-- éviter qu'un input résiduel passe.
-		local character = player.Character
-		if character then
-			local playerHum = character:FindFirstChildOfClass("Humanoid")
-			if playerHum then
-				playerHum.WalkSpeed = 0
-				playerHum.JumpPower = 0
-				playerHum.JumpHeight = 0
-				playerHum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
-				playerHum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
-			end
-		end
-
-		-- Déplacement clavier : WASD / flèches dirige le brainrot relatif à
-		-- la caméra. On met à jour le MoveVector chaque frame.
-		local moveKeys = {
-			[Enum.KeyCode.W] = Vector3.new(0, 0, -1),
-			[Enum.KeyCode.S] = Vector3.new(0, 0,  1),
-			[Enum.KeyCode.A] = Vector3.new(-1, 0, 0),
-			[Enum.KeyCode.D] = Vector3.new( 1, 0, 0),
-			[Enum.KeyCode.Up]    = Vector3.new(0, 0, -1),
-			[Enum.KeyCode.Down]  = Vector3.new(0, 0,  1),
-			[Enum.KeyCode.Left]  = Vector3.new(-1, 0, 0),
-			[Enum.KeyCode.Right] = Vector3.new( 1, 0, 0),
-		}
-
-		inputConn = RunService.RenderStepped:Connect(function()
-			if not currentBrainrot or not currentBrainrot.Parent then return end
-			local h = currentBrainrot:FindFirstChildOfClass("Humanoid")
-			if not h then return end
-			local hrp = currentBrainrot:FindFirstChild("HumanoidRootPart")
-
-			-- Pendant l'animation de la wave (rise + showcase), on fige le brainrot :
-			-- pas d'input, pas de vélocité, pas de saut. Le flag est levé à
-			-- WaveRise et retiré à WaveChase.
-			if _G.DunkBrainrotFrozen then
-				h:Move(Vector3.zero, false)
-				if hrp then
-					local vel = hrp.AssemblyLinearVelocity
-					hrp.AssemblyLinearVelocity = Vector3.new(0, math.min(vel.Y, 0), 0)
-				end
-				return
-			end
-
-			local move = Vector3.zero
-			for key, dir in pairs(moveKeys) do
-				if UserInputService:IsKeyDown(key) then
-					move = move + dir
-				end
-			end
-
-			-- Converti le vecteur local caméra en direction world.
-			local worldMove = Vector3.zero
-			if move.Magnitude > 0 then
-				move = move.Unit
-				local camCF = camera.CFrame
-				local camLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
-				if camLook.Magnitude > 0.001 then
-					camLook = camLook.Unit
-					local camRight = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z).Unit
-					worldMove = camRight * move.X + camLook * (-move.Z)
-				else
-					worldMove = move
-				end
-			end
-
-			h:Move(worldMove, false)
-
-			-- Préserve la vélocité horizontale en l'air : Humanoid:Move() n'applique
-			-- qu'une force très réduite en Freefall, donc le brainrot perd sa vitesse
-			-- au décollage. On force AssemblyLinearVelocity à WalkSpeed sur X/Z tant
-			-- qu'on tient une direction, et on préserve l'inertie si pas d'input.
-			if hrp then
-				local state = h:GetState()
-				local isAirborne = (state == Enum.HumanoidStateType.Freefall
-					or state == Enum.HumanoidStateType.Jumping)
-				if isAirborne then
-					local vel = hrp.AssemblyLinearVelocity
-					if worldMove.Magnitude > 0 then
-						-- Oriente la vitesse horizontale dans la direction d'input
-						-- à WalkSpeed constant, en gardant la composante verticale.
-						local targetHoriz = worldMove.Unit * h.WalkSpeed
-						hrp.AssemblyLinearVelocity = Vector3.new(targetHoriz.X, vel.Y, targetHoriz.Z)
-					end
-					-- Sans input : on laisse l'inertie faire (pas d'override)
-				end
-			end
-		end)
-
-		-- Saut (Space).
-		table.insert(controlBindings, UserInputService.InputBegan:Connect(function(input, gpe)
-			if gpe then return end
-			if not currentBrainrot or not currentBrainrot.Parent then return end
-			if _G.DunkBrainrotFrozen then return end
-			if input.KeyCode == Enum.KeyCode.Space then
-				local h = currentBrainrot:FindFirstChildOfClass("Humanoid")
-				if h then
-					h.Jump = true
-				end
-			end
-		end))
 	end
 
 	local localBlock, localCarrier -- Lucky block cloné localement (client only)
+	local currentLuckBlockSkin -- nom de la rareté du skin actuellement affiché (Common, Uncommon, ...)
+	local luckyBlockSwapCount -- nombre de swaps de skin depuis le début du vol (sert pour le pitch shift)
 	local localFlightClone -- Clone PERFECT (Superman) cloné localement
 	local flightSound -- Sound actif pendant le vol (stoppé à l'impact).
 
@@ -692,6 +971,11 @@ function DunkLuckyBlockController:Start()
 	-- workspace, anchored, prêt à être tweené frame par frame en même temps
 	-- que le bloc. Le clone est positionné derrière le bloc, corps horizontal,
 	-- les deux bras tendus vers l'avant qui touchent l'arrière du bloc.
+
+	-- Forward declaration : poseArmsForward est défini plus bas mais utilisé
+	-- dans buildSupermanClone (qui suit immédiatement).
+	local poseArmsForward
+
 	local function destroyFlightClone()
 		if localFlightClone and localFlightClone.Parent then
 			localFlightClone:Destroy()
@@ -738,17 +1022,27 @@ function DunkLuckyBlockController:Start()
 		local animateScript = clone:FindFirstChild("Animate")
 		if animateScript then animateScript.Disabled = true end
 
-		-- Désactive le humanoid pour qu'il ne rejoue pas d'animations idle/fall
+		-- Désactive le humanoid pour qu'il ne rejoue pas d'animations idle/fall.
+		-- IMPORTANT : on GARDE le Humanoid (sinon les vêtements layered clothing
+		-- et certains accessoires ne se rendent plus). À la place, on détruit
+		-- l'Animator : sans Animator, aucune animation ne peut tourner et donc
+		-- la pose qu'on applique manuellement reste figée frame par frame.
 		local hum = clone:FindFirstChildOfClass("Humanoid")
 		if hum then
 			hum.PlatformStand = true
 			hum.AutoRotate = false
-			-- Stop tous les animation tracks déjà joués
+			-- Désactive tous les states pour bloquer toute simulation interne.
+			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+				pcall(function() hum:SetStateEnabled(state, false) end)
+			end
 			local animator = hum:FindFirstChildOfClass("Animator")
 			if animator then
 				for _, t in ipairs(animator:GetPlayingAnimationTracks()) do
 					t:Stop(0)
 				end
+				-- Détruit l'Animator : aucune animation ne pourra plus s'exécuter,
+				-- donc la pose Motor6D ne sera jamais écrasée.
+				animator:Destroy()
 			end
 		end
 
@@ -780,52 +1074,67 @@ function DunkLuckyBlockController:Start()
 			end
 		end
 
-		local function poseShoulder(motor)
-			if not motor then return end
-			local pos = motor.C0.Position
-			motor.C0 = CFrame.new(pos) * CFrame.Angles(-math.rad(90), 0, 0)
+		-- Stocke les C0 originaux (pour référence/debug, on n'écrit plus dessus).
+		local originalC0 = {}
+		for name, motor in pairs(motorsByName) do
+			originalC0[name] = motor.C0
 		end
-		-- Bras droits/gauches en R15 et R6.
-		poseShoulder(motorsByName["RightShoulder"])
-		poseShoulder(motorsByName["LeftShoulder"])
-		poseShoulder(motorsByName["Right Shoulder"])
-		poseShoulder(motorsByName["Left Shoulder"])
-		-- Coudes en R15 : on garde les bras droits (pas de pliure).
-		local function straightenElbow(motor)
-			if not motor then return end
-			local pos = motor.C0.Position
-			motor.C0 = CFrame.new(pos)
+
+		-- DÉTRUIRE les Motor6D des bras pour que les parts soient complètement
+		-- indépendantes du rig. Sans ça, même si on place les parts manuellement,
+		-- la simulation interne peut tenter de les replacer selon C0/C1 du rig
+		-- d'origine et les bras restent "collés au corps".
+		local armMotorNames = {
+			"RightShoulder", "RightElbow", "RightWrist",
+			"LeftShoulder",  "LeftElbow",  "LeftWrist",
+			"Right Shoulder", "Left Shoulder",  -- R6
+		}
+		for _, name in ipairs(armMotorNames) do
+			local m = motorsByName[name]
+			if m then m:Destroy() end
 		end
-		straightenElbow(motorsByName["RightElbow"])
-		straightenElbow(motorsByName["LeftElbow"])
 
-		-- Une frame de simulation pour que les Motor6D propagent les positions
-		-- aux parts. Sans ce wait, les parts gardent leur position initiale.
-		RunService.Stepped:Wait()
-
-		-- Calcule la "reach" : distance horizontale entre HRP et le bout des
-		-- mains après pose. On prend la moyenne des deux mains.
-		local cHRP = clone:FindFirstChild("HumanoidRootPart")
-		local rHand = clone:FindFirstChild("RightHand") or clone:FindFirstChild("Right Arm")
-		local lHand = clone:FindFirstChild("LeftHand") or clone:FindFirstChild("Left Arm")
-		local reach = 4 -- fallback
-		if cHRP then
-			local hrpCF = cHRP.CFrame
-			local samples = {}
-			if rHand then table.insert(samples, hrpCF:PointToObjectSpace(rHand.Position)) end
-			if lHand then table.insert(samples, hrpCF:PointToObjectSpace(lHand.Position)) end
-			if #samples > 0 then
-				local sumZ = 0
-				for _, p in ipairs(samples) do
-					sumZ = sumZ + p.Z
-				end
-				-- Z local du HRP : -Z = devant. On prend |Z| comme reach.
-				reach = math.abs(sumZ / #samples)
+		-- Calcule la "reach" : longueur TOTALE du bras une fois pose en
+		-- Superman (du HRP jusqu'au bout de la main). On somme la Size.Y des
+		-- parts du bras (UpperArm + LowerArm + Hand pour R15, Arm pour R6) car
+		-- poseArmsForward les place bout a bout le long de l'UpVector du HRP.
+		-- Sans ce calcul correct, on mesurait la position des mains en pose
+		-- defaut (bras le long du corps, ~0.5 stud) au lieu de la pose Superman
+		-- (~2.5 studs), donc le HRP etait place trop pres du bloc et les bras
+		-- en pose tendus passaient au-dela : les mains se retrouvaient DANS le
+		-- bloc et le pivot d'inclinaison se faisait au torse au lieu des mains.
+		local function calcArmChainLength(side)
+			local upperArm = clone:FindFirstChild(side .. "UpperArm")
+			local lowerArm = clone:FindFirstChild(side .. "LowerArm")
+			local hand     = clone:FindFirstChild(side .. "Hand")
+			local r6Arm    = clone:FindFirstChild(side .. " Arm")
+			if upperArm then
+				local total = upperArm.Size.Y
+				if lowerArm then total = total + lowerArm.Size.Y end
+				if hand then total = total + hand.Size.Y end
+				return total
+			elseif r6Arm then
+				return r6Arm.Size.Y
 			end
+			return nil
+		end
+		local rightLen = calcArmChainLength("Right")
+		local leftLen = calcArmChainLength("Left")
+		local reach = 4 -- fallback si aucun bras detecte
+		local armSamples = {}
+		if rightLen then table.insert(armSamples, rightLen) end
+		if leftLen then table.insert(armSamples, leftLen) end
+		if #armSamples > 0 then
+			local sum = 0
+			for _, l in ipairs(armSamples) do sum = sum + l end
+			reach = sum / #armSamples
 		end
 
 		-- Re-anchore tout : la pose est figée, on peut maintenant tweener le
-		-- HRP frame par frame sans recalcul des Motor6D.
+		-- HRP frame par frame sans recalcul des Motor6D. On GARDE le Humanoid
+		-- pour que les vêtements layered clothing et accessoires se rendent
+		-- correctement (l'Animator a déjà été détruit, donc rien ne peut plus
+		-- bouger les Motor6D).
 		for _, d in ipairs(clone:GetDescendants()) do
 			if d:IsA("BasePart") then
 				d.Anchored = true
@@ -835,42 +1144,131 @@ function DunkLuckyBlockController:Start()
 		return clone, reach
 	end
 
-	-- Met à jour la pose du clone Superman en fonction de la position du bloc.
-	-- Le clone est placé derrière le bloc, mains tendues qui touchent la face
-	-- arrière. La direction "avant" est calculée dynamiquement à partir de la
-	-- vitesse du bloc (delta entre frames). Le tilt est de -90° (corps horiz).
+	-- Pose les bras du clone tendus EN DIRECTION DU BLOC (assignation à la
+	-- variable forward-declarée plus haut, pour que buildSupermanClone puisse
+	-- l'appeler).
+	poseArmsForward = function(clone)
+		local hrp = clone:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local torsoCF = hrp.CFrame
+		local towardBlock = torsoCF.UpVector
+		local rightVec = torsoCF.RightVector
+
+		local function placeArmChain(side, sideMul)
+			-- Cherche les parts du bras (R15) ou la part R6.
+			local upperArm = clone:FindFirstChild(side .. "UpperArm")
+			local lowerArm = clone:FindFirstChild(side .. "LowerArm")
+			local hand     = clone:FindFirstChild(side .. "Hand")
+			local r6Arm    = clone:FindFirstChild(side .. " Arm")
+
+			-- Position de l'épaule dans le repère HRP : sur le côté du torse, au
+			-- niveau du milieu du torse (= centre du HRP). Avec Y=0 on est au
+			-- niveau des épaules anatomiques.
+			local shoulderLocalOffset = Vector3.new(sideMul * 1.0, 0, 0)
+			local shoulderWorld = torsoCF * shoulderLocalOffset
+
+			-- Construit l'orientation : longueur de la part (axe Y) alignée avec
+			-- towardBlock. La part s'étend depuis l'épaule vers le bloc.
+			local function placePartOnAxis(part, distFromShoulder)
+				if not part then return end
+				local halfY = part.Size.Y * 0.5
+				local centerWorld = shoulderWorld + towardBlock * (distFromShoulder + halfY)
+				part.CFrame = CFrame.fromMatrix(centerWorld, rightVec, towardBlock)
+			end
+
+			if upperArm then
+				-- R15 : trois parts placées bout à bout selon Size.Y.
+				placePartOnAxis(upperArm, 0)
+				local accumLen = upperArm.Size.Y
+				if lowerArm then
+					placePartOnAxis(lowerArm, accumLen)
+					accumLen = accumLen + lowerArm.Size.Y
+					if hand then
+						placePartOnAxis(hand, accumLen)
+					end
+				end
+			elseif r6Arm then
+				-- R6 : une seule part par bras.
+				placePartOnAxis(r6Arm, 0)
+			end
+		end
+
+		placeArmChain("Right",  1)
+		placeArmChain("Left",  -1)
+	end
+
+	-- Met a jour la pose du clone Superman en fonction de la position du bloc.
+	-- IMPORTANT : le pivot d'inclinaison doit etre aux MAINS (au point de
+	-- contact avec l'arriere du bloc), pas au centre du corps. Sans ca, quand
+	-- le clone s'incline avec la trajectoire, ses mains se decrochent du bloc.
+	-- On calcule donc d'abord le point d'ancrage (mains au bord arriere du
+	-- bloc), on construit l'orientation cible avec le pitch, puis on place le
+	-- HRP en arriere de l'ancrage le long de l'axe "corps -> mains" du clone.
+	-- EXTRA_BACK_OFFSET = 0 : les mains touchent EXACTEMENT le centre de la
+	-- face arriere du bloc. Pas de marge supplementaire, sinon les mains se
+	-- decrochent visiblement du bloc.
+	local EXTRA_BACK_OFFSET = 0
+	-- Limite l'inclinaison +/- pour que le clone reste lisible. 15 deg donne
+	-- Inclinaison subtile qui suggère la trajectoire sans deformer la pose.
+	local MAX_PITCH_DEG = 15
+	-- Facteur de lissage exponentiel sur le pitch (par seconde). Diminué à 4
+	-- pour atténuer les saccades visuelles : la pose suit doucement les
+	-- variations de pente plutôt que de coller frame par frame.
+	local PITCH_SMOOTHING = 4
+	local smoothedPitch = 0
+	local lastPitchTime = nil
 	local function updateSupermanCloneCFrame(clone, blockPos, prevBlockPos, blockHalfDepth, reach)
 		if not clone or not clone.Parent then return end
 		local hrp = clone:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
 
 		local flightDir
+		local targetPitch = 0
 		if prevBlockPos then
 			local delta = blockPos - prevBlockPos
-			-- Pour la direction de "l'avant" du clone, on ne considère que la
-			-- composante horizontale de la vitesse (X/Z), sinon le clone
-			-- inclinerait avec la trajectoire ce qu'on ne veut pas.
 			local flat = Vector3.new(delta.X, 0, delta.Z)
-			if flat.Magnitude > 0.01 then
+			local flatMag = flat.Magnitude
+			if flatMag > 0.01 then
 				flightDir = flat.Unit
+				-- Pente : positive en montee, negative en descente.
+				targetPitch = math.atan2(delta.Y, flatMag)
 			end
 		end
 		if not flightDir then
 			flightDir = Vector3.new(-1, 0, 0)
 		end
 
-		-- HRP placé derrière le bloc à une distance qui aligne EXACTEMENT le
-		-- bout des mains avec la face arrière du bloc :
-		--   distance = blockHalfDepth + reach
-		local hrpPos = blockPos - flightDir * (blockHalfDepth + reach)
+		-- Lissage exponentiel framerate-independent du pitch.
+		local now = os.clock()
+		local dt = lastPitchTime and (now - lastPitchTime) or 0
+		lastPitchTime = now
+		local alpha = 1 - math.exp(-PITCH_SMOOTHING * math.max(dt, 0))
+		smoothedPitch = smoothedPitch + (targetPitch - smoothedPitch) * alpha
+		local pitchClamped = math.clamp(smoothedPitch, -math.rad(MAX_PITCH_DEG), math.rad(MAX_PITCH_DEG))
 
-		-- Construit le CFrame : LookVector vers flightDir (clone regarde le bloc),
-		-- puis tilt de -90° sur X local pour mettre le corps à l'horizontale.
-		local newHrpCF = CFrame.lookAt(hrpPos, hrpPos + flightDir)
-		                * CFrame.Angles(-math.rad(90), 0, 0)
+		-- Point d'ancrage : ou les mains touchent l'arriere du bloc. C'est ce
+		-- point qui doit rester FIXE quand le pitch change.
+		local anchorPos = blockPos - flightDir * (blockHalfDepth + EXTRA_BACK_OFFSET)
+
+		-- Construit l'orientation cible du HRP en pose Superman tiltee :
+		--   LookVector = -UpVector_original (pointe vers le bas en pitch=0)
+		--   UpVector   = flightDir incline du pitch (pointe vers les mains)
+		-- Le UpVector du HRP est EXACTEMENT l'axe "corps -> mains" du clone, donc
+		-- on s'en sert pour reculer le HRP a partir du point d'ancrage.
+		local baseCF = CFrame.lookAt(Vector3.zero, flightDir)
+		                * CFrame.Angles(-math.rad(90) + pitchClamped, 0, 0)
+		local cloneUp = baseCF.UpVector
+
+		-- HRP = ancrage des mains - reach * direction_corps_vers_mains.
+		local hrpPos = anchorPos - cloneUp * reach
+		local newHrpCF = baseCF + hrpPos
 
 		local pivotDelta = newHrpCF * hrp.CFrame:Inverse()
 		clone:PivotTo(pivotDelta * clone:GetPivot())
+
+		-- Pose les bras tendus vers le bloc apres le PivotTo, pour qu'ils
+		-- suivent l'orientation actuelle du HRP.
+		poseArmsForward(clone)
 	end
 
 	-- Helper : crée un effet d'impact météorite : juste les débris (cubes)
@@ -913,7 +1311,15 @@ function DunkLuckyBlockController:Start()
 	end
 
 	local function destroyLocalBlock()
-		if localBlock and localBlock.Parent then localBlock:Destroy() end
+		-- Si localBlock est un clone du cache, on ne le detruit pas : on le
+		-- replanque hors-ecran pour la prochaine fois.
+		if localBlock and localBlock.Parent then
+			if isCachedSkin(localBlock) then
+				localBlock:PivotTo(CFrame.new(0, -100000, 0))
+			else
+				localBlock:Destroy()
+			end
+		end
 		if localCarrier and localCarrier.Parent then localCarrier:Destroy() end
 		localBlock, localCarrier = nil, nil
 	end
@@ -947,48 +1353,24 @@ function DunkLuckyBlockController:Start()
 			local serverStart   = data.ServerStartTime
 			local grade         = data.Grade -- PERFECT bloque la rotation du block
 
-			-- 1) Clone le LuckyBlock Basic LOCALEMENT sur le client qui a lancé.
-			-- L'animation sera donc 100% locale, sans réplication réseau : fluidité max.
+			-- 1) Selectionne le skin de la zone de DEPART depuis le cache (preclone
+			-- au demarrage du controller). Aucun cloning runtime = aucune saccade.
+			-- Fallback : si le cache n'est pas encore pret (debut de session), on
+			-- clone a la volee.
 			destroyLocalBlock()
-			local basicTemplate = ReplicatedStorage:WaitForChild("LuckyBlocks"):WaitForChild("Basic")
-			localBlock = basicTemplate:Clone()
-			localBlock.Name = "LocalDunkLuckyBlock"
-			-- Trouve le PrimaryPart si pas défini.
-			if not localBlock.PrimaryPart then
-				for _, d in ipairs(localBlock:GetDescendants()) do
-					if d:IsA("BasePart") then
-						localBlock.PrimaryPart = d
-						break
-					end
+			local initialRarity = worldXToRarity(launchOrigin.X)
+			hideAllCachedSkins()
+			localBlock = skinCache[initialRarity]
+			if not localBlock then
+				local initialTemplate = getLuckBlockTemplate(initialRarity)
+				if not initialTemplate then
+					initialTemplate = ReplicatedStorage:WaitForChild("LuckyBlocks"):WaitForChild("Basic")
 				end
+				localBlock = setupLocalBlockClone(initialTemplate)
+				localBlock.Parent = Workspace
 			end
-
-			-- Zero-out les PivotOffset sur toutes les parts : les modèles Roblox
-			-- ont souvent un pivot décalé au bas du mesh, ce qui fait que les
-			-- rotations paraissent déportées. On remet le pivot au centre géométrique.
-			for _, d in ipairs(localBlock:GetDescendants()) do
-				if d:IsA("BasePart") then
-					d.PivotOffset = CFrame.new()
-				end
-			end
-
-			-- Applique un scale multiplicatif (ScaleTo est absolu, donc on
-			-- multiplie la valeur courante pour rendre le block 2x plus gros).
-			local currentScale = localBlock:GetScale()
-			localBlock:ScaleTo(currentScale * 2)
-
-			-- Centre le pivot du modèle sur le centre de sa bounding box.
-			localBlock.WorldPivot = localBlock:GetBoundingBox()
-
-			for _, d in ipairs(localBlock:GetDescendants()) do
-				if d:IsA("BasePart") then
-					d.Anchored = true
-					d.CanCollide = false
-					d.CanQuery = false
-					d.CanTouch = false
-				end
-			end
-			localBlock.Parent = Workspace
+			currentLuckBlockSkin = initialRarity
+			luckyBlockSwapCount = 0 -- reset compteur pour le pitch shift
 
 			-- Place la caméra DERRIÈRE le block avant de passer en mode Custom.
 			-- La position initiale est celle du block au début du vol (launchOrigin).
@@ -997,10 +1379,9 @@ function DunkLuckyBlockController:Start()
 			camera.CameraType = Enum.CameraType.Scriptable
 			camera.CFrame = CFrame.new(launchOrigin + Vector3.new(15, 6, 0), launchOrigin)
 
-			-- Bascule en Custom avec le block comme sujet : le joueur peut désormais
-			-- bouger la caméra autour du block avec la souris pendant le vol.
+			-- Bascule en Custom immédiatement (CameraSubject sera assigné au
+			-- localCarrier juste après sa création, plus bas dans cette fonction).
 			camera.CameraType = Enum.CameraType.Custom
-			camera.CameraSubject = localBlock.PrimaryPart
 			_G.DunkBlockCamera = true
 
 			-- Hauteur du block après scale, pour que le block repose au sol à
@@ -1021,6 +1402,10 @@ function DunkLuckyBlockController:Start()
 			localCarrier.Massless = true
 			localCarrier.CFrame = CFrame.new(launchOrigin)
 			localCarrier.Parent = Workspace
+
+			-- La caméra suit le carrier (qui ne change jamais d'instance), pas
+			-- le localBlock qui swap d'instance à chaque zone -> évite les jumps.
+			camera.CameraSubject = localCarrier
 
 			local att0 = Instance.new("Attachment")
 			att0.Position = Vector3.new(0, 1.2, 0)
@@ -1084,13 +1469,16 @@ function DunkLuckyBlockController:Start()
 			end
 
 			-- ===== CLONE PERFECT (pose Superman) =====
-			-- En PERFECT, le client crée un clone du character du joueur en pose
+			-- En PERFECT, le client cree un clone du character du joueur en pose
 			-- Superman (corps horizontal, deux bras tendus vers l'avant). Le
-			-- clone sera animé dans la même RenderStepped que le bloc → synchro
-			-- frame parfaite, zéro saccade réseau.
+			-- clone sera anime dans la meme RenderStepped que le bloc -> synchro
+			-- frame parfaite, zero saccade reseau.
 			local flightCloneReach = 0
 			local blockHalfDepth = scaledSize.Z * 0.5
 			destroyFlightClone()
+			-- Reset du pitch lisse pour que le nouveau vol parte d'une pose neutre.
+			smoothedPitch = 0
+			lastPitchTime = nil
 			if data.IsPerfect then
 				local clone, reach = buildSupermanClone()
 				if clone then
@@ -1100,16 +1488,21 @@ function DunkLuckyBlockController:Start()
 			end
 
 			-- 4) Animation locale du block. La caméra est en mode Custom suivant
-			-- le block : le joueur peut orbiter autour librement avec sa souris.
-			-- IMPORTANT : on utilise os.clock() (horloge locale) comme base de temps,
-			-- PAS workspace:GetServerTimeNow() qui a du jitter réseau. Le temps
-			-- local est parfaitement monotone et lisse frame par frame.
+			-- le carrier : le joueur peut orbiter autour librement avec sa souris.
+			-- IMPORTANT : on utilise BindToRenderStep avec priorité Camera-1 pour
+			-- bouger le bloc et le carrier AVANT que la caméra lise leur position.
+			-- Sinon la caméra utilise la position de la frame précédente -> jitter
+			-- d'1 frame perceptible comme du saccé.
 			local localStartTime = os.clock()
 			local lastBlockPos = launchOrigin
-			local flightConn
-			flightConn = RunService.RenderStepped:Connect(function()
+			local RENDER_STEP_NAME = "DunkLuckyBlockFlight"
+			local flightConn = nil -- inutilisé, conservé pour compat avec le code en aval
+			local flightActive = true
+			RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value - 1, function()
+				if not flightActive then return end
 				if not _G.DunkBlockCamera then
-					if flightConn then flightConn:Disconnect() end
+					flightActive = false
+					pcall(function() RunService:UnbindFromRenderStep(RENDER_STEP_NAME) end)
 					return
 				end
 				local elapsed = os.clock() - localStartTime
@@ -1140,12 +1533,55 @@ function DunkLuckyBlockController:Start()
 					spinZ = spinT * math.pi * 0.4
 				end
 
+				-- Swap du skin du Lucky Block selon la zone (rarete) traversee
+				-- pendant le vol. On teleporte le clone deja prepare au demarrage
+				-- (cache) et on planque l'ancien hors-ecran. Aucun Clone/ScaleTo
+				-- runtime = zero saccade. Le swap n'a lieu QUE quand on franchit
+				-- une frontiere de zone (max ~9 fois sur tout le vol).
+				local newRarity = worldXToRarity(pos.X)
+				if newRarity ~= currentLuckBlockSkin then
+					local newBlock = skinCache[newRarity]
+					if not newBlock then
+						-- Fallback : cache pas pret pour ce skin, on clone a la volee.
+						local newTemplate = getLuckBlockTemplate(newRarity)
+						if newTemplate then
+							newBlock = setupLocalBlockClone(newTemplate)
+							newBlock.Parent = Workspace
+						end
+					end
+					if newBlock then
+						local oldBlock = localBlock
+						localBlock = newBlock
+						currentLuckBlockSkin = newRarity
+						luckyBlockSwapCount = (luckyBlockSwapCount or 0) + 1
+						-- Planque l'ancien hors-ecran (cache) ou detruit (fallback).
+						if oldBlock and oldBlock.Parent then
+							if isCachedSkin(oldBlock) then
+								oldBlock:PivotTo(CFrame.new(0, -100000, 0))
+							else
+								oldBlock:Destroy()
+							end
+						end
+						if newBlock.PrimaryPart then
+							-- Pas de camera.CameraSubject = newBlock : le carrier est déjà
+							-- le sujet depuis le début du vol pour éviter les jumps de
+							-- caméra à chaque swap de zone.
+							VFXPlayer.PlayOnPart("SlapVFX", newBlock.PrimaryPart)
+						end
+						-- Son RarityChange avec pitch qui monte a chaque swap.
+						playRarityChangeSound(luckyBlockSwapCount)
+					end
+				end
+
 				if localBlock and localBlock.Parent then
+					-- Orientation de base : -90 deg sur Y pour que les blocks soient
+					-- dans le bon sens (sinon ils apparaissent latéralisés).
+					local baseRot = CFrame.Angles(0, math.rad(-90), 0)
 					if t >= 1 then
-						-- Atterrissage : block à plat, sans aucune rotation.
-						localBlock:PivotTo(CFrame.new(pos))
+						-- Atterrissage : block à plat, sans spin (mais base rotation).
+						localBlock:PivotTo(CFrame.new(pos) * baseRot)
 					else
-						localBlock:PivotTo(CFrame.new(pos) * CFrame.Angles(spinX, spinY, spinZ))
+						localBlock:PivotTo(CFrame.new(pos) * baseRot * CFrame.Angles(spinX, spinY, spinZ))
 					end
 				end
 				if localCarrier and localCarrier.Parent then
@@ -1168,7 +1604,8 @@ function DunkLuckyBlockController:Start()
 				lastBlockPos = pos
 
 				if t >= 1 then
-					if flightConn then flightConn:Disconnect() end
+					flightActive = false
+					pcall(function() RunService:UnbindFromRenderStep(RENDER_STEP_NAME) end)
 				end
 			end)
 
@@ -1195,7 +1632,9 @@ function DunkLuckyBlockController:Start()
 			if localBlock and localBlock.Parent and impactPos then
 				local _, scaledSize = localBlock:GetBoundingBox()
 				local halfY = scaledSize.Y * 0.5
-				localBlock:PivotTo(CFrame.new(impactPos + Vector3.new(0, halfY, 0)))
+				-- Pose le block au sol AVEC la rotation -90 deg sur Y, comme
+				-- pendant le vol, pour qu'il garde la même orientation visuelle.
+				localBlock:PivotTo(CFrame.new(impactPos + Vector3.new(0, halfY, 0)) * CFrame.Angles(0, math.rad(-90), 0))
 			end
 
 			-- Spawn les FX d'impact LOCALEMENT (seul ce joueur les voit).
@@ -1273,14 +1712,15 @@ function DunkLuckyBlockController:Start()
 			end
 
 		elseif phase == "BrainrotPicked" then
-			-- On libère la caméra du block pour la passer au brainrot.
+			-- On libère la caméra du block.
 			_G.DunkBlockCamera = false
-			-- Cache le character du joueur (resté statique au spawn) pour qu'on
-			-- ne le voie pas en double avec le brainrot/clone qui court.
-			hidePlayerCharacter()
-			local brainrot = data and data.BrainrotPath
-			if brainrot then
-				takeControl(brainrot)
+			-- Le serveur a déjà weldé le mesh brainrot sur le character et caché
+			-- le corps original (via PlayerBrainrotTransform). Le client n'a plus
+			-- qu'à ajuster la caméra et hooker le mécanisme de freeze pour les
+			-- phases de wave.
+			local brainrotName = data and data.BrainrotName
+			if brainrotName then
+				takeControl(brainrotName, data.WalkSpeed, data.JumpPower)
 			end
 
 		elseif phase == "WaveRise" then
@@ -1380,6 +1820,15 @@ function DunkLuckyBlockController:Start()
 			end
 
 		elseif phase == "WaveChase" then
+			-- Sécurité : si pour une raison quelconque BrainrotPicked n'a pas été
+			-- appliqué (race condition réseau, frame drop), on récupère le contrôle
+			-- ici. Sinon le joueur reste sur son character d'origine après la
+			-- wave et ne peut pas courir.
+			local brainrotNameForControl = data and data.BrainrotName
+			if brainrotNameForControl and not attachedBrainrotVisual then
+				takeControl(brainrotNameForControl, data.WalkSpeed, data.JumpPower)
+			end
+
 			-- Son de poursuite : joue en boucle tant que le brainrot n'est ni
 			-- arrivé (BrainrotSold/End) ni touché (BrainrotLost).
 			if chaseSound and chaseSound.Parent then
@@ -1433,72 +1882,63 @@ function DunkLuckyBlockController:Start()
 					localWaveModel:PivotTo(CFrame.lookAt(newPos, newPos + waveDir, Vector3.new(0, 1, 0)))
 				end)
 			end
-			-- Retour caméra sur le brainrot : la wave commence sa poursuite.
-			-- Transition FLUIDE : on tween la caméra depuis sa position actuelle
-			-- (sur la wave) vers une position DERRIÈRE le brainrot, regardant dans
-			-- la direction OPPOSÉE à la wave (pour voir où le brainrot doit fuir).
+			-- Retour caméra sur le character (qui est devenu le brainrot via
+			-- weld). Transition FLUIDE : on tween la caméra depuis sa position
+			-- actuelle (sur la wave) vers une position DERRIÈRE le character,
+			-- regardant dans la direction OPPOSÉE à la wave (pour voir où fuir).
 			-- Puis on bascule en Custom pour laisser le joueur piloter la caméra.
 			_G.DunkWaveCamera = false
-			local brainrot = data and data.BrainrotPath
 			local waveDir = data and data.WaveDirection
-			if brainrot and brainrot.Parent then
-				local hrp = brainrot:FindFirstChild("HumanoidRootPart")
-				local hum = brainrot:FindFirstChildOfClass("Humanoid")
-				if hrp and hum and waveDir then
-					-- Direction "face" du brainrot = opposé de la direction de la wave.
-					local faceDir = Vector3.new(waveDir.X, 0, waveDir.Z)
-					if faceDir.Magnitude > 1e-3 then
-						faceDir = faceDir.Unit
+			local character = player.Character
+			local hrp = character and character:FindFirstChild("HumanoidRootPart")
+			local hum = character and character:FindFirstChildOfClass("Humanoid")
+			if hrp and hum and waveDir then
+				local faceDir = Vector3.new(waveDir.X, 0, waveDir.Z)
+				if faceDir.Magnitude > 1e-3 then
+					faceDir = faceDir.Unit
+				else
+					faceDir = Vector3.new(1, 0, 0)
+				end
+
+				local camBackDir = -faceDir
+				camera.CameraType = Enum.CameraType.Scriptable
+				local startCF = camera.CFrame
+				local TWEEN_DURATION = 0.8
+				local tweenStart = os.clock()
+				local tweenConn
+				tweenConn = RunService.RenderStepped:Connect(function()
+					local alpha = math.clamp((os.clock() - tweenStart) / TWEEN_DURATION, 0, 1)
+					local eased
+					if alpha < 0.5 then
+						eased = 4 * alpha * alpha * alpha
 					else
-						faceDir = Vector3.new(1, 0, 0)
+						local f = (2 * alpha - 2)
+						eased = 0.5 * f * f * f + 1
 					end
-
-					-- Caméra derrière le brainrot (côté opposé de faceDir, i.e.
-					-- du côté de la wave) regardant vers faceDir.
-					local camBackDir = -faceDir
-					local target = hrp.Position + Vector3.new(0, 2, 0)
-					local endCamPos = target + camBackDir * 14 + Vector3.new(0, 5, 0)
-					local endCF = CFrame.new(endCamPos, target)
-
-					camera.CameraType = Enum.CameraType.Scriptable
-					local startCF = camera.CFrame
-					local TWEEN_DURATION = 0.8
-					local tweenStart = os.clock()
-					local tweenConn
-					tweenConn = RunService.RenderStepped:Connect(function()
-						local alpha = math.clamp((os.clock() - tweenStart) / TWEEN_DURATION, 0, 1)
-						-- Easing cubique inout : démarrage doux, vitesse au milieu,
-						-- arrêt doux à la fin. Très cinématique.
-						local eased
-						if alpha < 0.5 then
-							eased = 4 * alpha * alpha * alpha
-						else
-							local f = (2 * alpha - 2)
-							eased = 0.5 * f * f * f + 1
-						end
-						-- Cible "vivante" : on recalcule endCF chaque frame à partir
-						-- de la position actuelle du brainrot (qui bouge).
-						local liveTarget = hrp.Position + Vector3.new(0, 2, 0)
+					-- Cible "vivante" : on recalcule chaque frame depuis la position
+					-- actuelle du character (qui bouge).
+					local liveCharHRP = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+					if liveCharHRP then
+						local liveTarget = liveCharHRP.Position + Vector3.new(0, 2, 0)
 						local liveEndPos = liveTarget + camBackDir * 14 + Vector3.new(0, 5, 0)
 						local liveEndCF = CFrame.new(liveEndPos, liveTarget)
 						camera.CFrame = startCF:Lerp(liveEndCF, eased)
-						if alpha >= 1 then
-							if tweenConn then tweenConn:Disconnect() end
-							-- Passe en Custom pour que le joueur puisse bouger la caméra.
-							camera.CameraType = Enum.CameraType.Custom
-							camera.CameraSubject = hum
-						end
-					end)
-				else
-					-- Fallback : pas de direction, bascule instantanée.
-					camera.CameraType = Enum.CameraType.Custom
-					if hum then camera.CameraSubject = hum end
-				end
+					end
+					if alpha >= 1 then
+						if tweenConn then tweenConn:Disconnect() end
+						camera.CameraType = Enum.CameraType.Custom
+						camera.CameraSubject = hum
+					end
+				end)
+			else
+				-- Fallback : pas de direction, bascule instantanée.
+				camera.CameraType = Enum.CameraType.Custom
+				if hum then camera.CameraSubject = hum end
 			end
 
 		elseif phase == "BrainrotLost" then
-			-- Le brainrot s'est fait attraper : la caméra repasse sur le character
-			-- du joueur et on relâche le contrôle. On laisse End faire le reste.
+			-- Le brainrot s'est fait attraper. Le serveur va gérer la restauration
+			-- visuelle du character via PlayerBrainrotTransform.Remove.
 			_G.DunkWaveCamera = false
 			_G.DunkBrainrotFrozen = false
 			if waveSound and waveSound.Parent then
@@ -1508,10 +1948,30 @@ function DunkLuckyBlockController:Start()
 				chaseSound:Stop(); chaseSound:Destroy(); chaseSound = nil
 			end
 			destroyLocalWave()
-			-- Restaure la visibilité du character.
-			showPlayerCharacter()
 			shakeCamera(camera, 0.4, 0.5)
 			releaseControl()
+
+			-- Force WalkSpeed/JumpPower pendant 2s pour battre tout cache local
+			-- residuel a 0 (depuis le freeze pendant WaveRise).
+			local char = player.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum then
+				local StarterPlayer = game:GetService("StarterPlayer")
+				local forceStart = os.clock()
+				local forceConn
+				forceConn = RunService.Heartbeat:Connect(function()
+					if not hum or not hum.Parent or os.clock() - forceStart > 2.0 then
+						if forceConn then forceConn:Disconnect() end
+						return
+					end
+					if hum.WalkSpeed < StarterPlayer.CharacterWalkSpeed then
+						hum.WalkSpeed = StarterPlayer.CharacterWalkSpeed
+					end
+					if hum.JumpPower < StarterPlayer.CharacterJumpPower then
+						hum.JumpPower = StarterPlayer.CharacterJumpPower
+					end
+				end)
+			end
 
 		elseif phase == "BrainrotSold" then
 			-- Visual feedback : flash blanc plein écran + confetti qui tombent.
@@ -1522,7 +1982,7 @@ function DunkLuckyBlockController:Start()
 				chaseSound:Stop(); chaseSound:Destroy(); chaseSound = nil
 			end
 			shakeCamera(camera, 0.25, 0.3)
-			playSoldFeedback(player)
+			playSoldFeedback(player, data and data.BrainrotName)
 
 		elseif phase == "End" then
 			_G.DunkBlockCamera = false
@@ -1536,9 +1996,6 @@ function DunkLuckyBlockController:Start()
 			destroyLocalWave()
 			destroyLocalBlock() -- filet de sécurité
 			destroyFlightClone() -- filet de sécurité (devrait être déjà détruit)
-			-- Restaure la visibilité du character (filet de sécurité si
-			-- BrainrotLost n'a pas été émis avant End).
-			showPlayerCharacter()
 			releaseControl()
 			_G.DunkSequenceInProgress = false
 
@@ -1555,16 +2012,8 @@ function DunkLuckyBlockController:Start()
 			-- Réactive le bouton reset.
 			setResetEnabled(true)
 
-			-- Restaure la vitesse et saut du character.
-			local character = player.Character
-			if character then
-				local playerHum = character:FindFirstChildOfClass("Humanoid")
-				if playerHum then
-					playerHum.WalkSpeed = 16
-					playerHum.JumpPower = 50
-					playerHum.JumpHeight = 7.2
-				end
-			end
+			-- Note: WalkSpeed/JumpPower sont déjà restaurés côté serveur dans
+			-- DunkLuckyBlockService après PlayerBrainrotTransform.Remove.
 		end
 	end)
 
@@ -1574,7 +2023,7 @@ function DunkLuckyBlockController:Start()
 		-- donc on oublie simplement la table de masquage (les références sont
 		-- périmées de toute façon).
 		hiddenCharacterParts = nil
-		if currentBrainrot then
+		if attachedBrainrotVisual then
 			releaseControl()
 			_G.DunkSequenceInProgress = false
 		end
