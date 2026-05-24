@@ -60,6 +60,15 @@ function WeightAnimationController:Start()
 
 	local ANIM_BARBELL = WeightsConfig.ANIM_BARBELL
 
+	-- Liste des poids qui sont des plaques/blocs (orientation différente :
+	-- pas de rotation 90° autour de Y dans startBarbellFollow). Tous les autres
+	-- sont des barres et reçoivent la rotation pour être horizontales.
+	local PLATE_NAMES = {
+		["Stone Block"] = true,
+		["Copper Plate"] = true,
+		["Iron Plate"] = true,
+	}
+
 	-- État par session. Tout est réinitialisé au respawn.
 	local currentToolName = nil
 	local freezeConnection = nil
@@ -168,21 +177,26 @@ function WeightAnimationController:Start()
 		local handle = tool:FindFirstChild("Handle")
 		if not handle then return end
 
-		local animId = WeightsConfig.AnimationByWeight[tool.Name]
-		local isBarbell = (animId == ANIM_BARBELL)
+		-- Pose un WeldConstraint LeftHand <-> Handle après un petit délai pour
+		-- que la pose de lift ait positionné les bras correctement avant que
+		-- le weld ne fige la position relative. Pas d'ancrage du Handle = pas
+		-- de conflit avec le Motor6D RightGrip natif (donc plus de main toupie).
+		-- Le RightGrip natif tient la main droite, notre weld tient la gauche :
+		-- prise à deux mains visible localement et répliquée (WeldConstraint
+		-- est répliqué par défaut, donc tous les joueurs voient le même résultat).
+		task.delay(0.3, function()
+			if not tool.Parent or tool.Parent ~= character then return end
+			if handle:FindFirstChild("WeightLeftHandWeld") then return end
 
-		-- Tracking client (RenderStepped 60fps) : place la barre entre les deux
-		-- mains animées du joueur local. Sans latence parce que c'est calculé
-		-- depuis ses propres mains simulées localement. Le client envoie aussi
-		-- la CFrame au serveur via UnreliableRemoteEvent (écriture cumulée dans
-		-- startBarbellFollow), ce qui synchronise l'affichage pour les autres
-		-- joueurs sans créer de double-source de vérité (le Handle est ancré
-		-- serveur, donc seules les écritures serveur se répliquent).
-		if isBarbell then
-			startBarbellFollow(handle, character, false)
-		else
-			startBarbellFollow(handle, character, true)
-		end
+			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
+			if not lh then return end
+
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = "WeightLeftHandWeld"
+			weld.Part0 = lh
+			weld.Part1 = handle
+			weld.Parent = handle
+		end)
 	end
 
 	local function removeWeightWeld()
@@ -313,11 +327,11 @@ function WeightAnimationController:Start()
 			unfreezePlayer(humanoid)
 			return
 		end
-		weldWeightToShoulders(tool, character)
 
-		-- L'animation de lift et le cycle de gain de Power sont joués par le
-		-- SERVEUR (WeightService). Ce client se contente de freeze, weld et
-		-- jouer le son sur addPowerEvent. Voir le top du fichier pour le pourquoi.
+		-- Le SERVEUR ancre + place le Handle entre les deux mains chaque frame.
+		-- C'est répliqué à tous les clients (joueur local + spectateurs), donc
+		-- tout le monde voit la barre bien centrée à deux mains. On ne fait
+		-- plus rien côté client pour le placement.
 	end
 
 	local function onCharacterAdded(character)

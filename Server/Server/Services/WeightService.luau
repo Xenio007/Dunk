@@ -43,120 +43,26 @@ local LENGTH_WAIT_TIMEOUT = 2.0
 --     track = AnimationTrack en cours,
 --     toolName = string,
 --     sessionToken = number,  -- invalidé quand on équipe / déséquipe
+--     followConn = RBXScriptConnection,  -- Heartbeat qui place la barre entre les mains
+--     handle = BasePart,                  -- ref au Handle pour cleanup
 -- }
 local liftSessions = {}
 
--- Tracking serveur de la barbell : positionne le Handle au milieu des deux
--- mains (Heartbeat) pour que TOUS les joueurs voient la barre tenue à deux
--- mains. C'est le SERVEUR qui drive le placement, pas le client.
---
--- Pourquoi on doit détruire le RightGrip natif : quand un Tool est équipé,
--- Roblox crée automatiquement un Motor6D "RightGrip" entre RightHand et
--- Handle. Si on ancre le Handle (nécessaire pour driver son CFrame chaque
--- frame sans bagarre avec la physique), le Motor6D + part ancrée forme une
--- chaîne invalide -> Roblox cache l'assembly entière du character. En
--- détruisant le RightGrip on élimine le conflit ; on tient la barre
--- visuellement via notre CFrame qui suit les deux mains.
---
--- [player.UserId] = { conn = RBXScriptConnection, handle = BasePart }
-local barbellTrackers = {}
+-- Liste des poids qui sont des plaques/blocs (orientation différente). Pour
+-- les autres (barres / barbell), on applique une rotation 90° autour de Y
+-- pour aligner l'axe long du mesh avec l'axe latéral entre les deux mains.
+local PLATE_NAMES = {
+	["Stone Block"] = true,
+	["Copper Plate"] = true,
+	["Iron Plate"] = true,
+}
 
-local function removeRightGripServer(character)
-	for _, name in ipairs({ "RightHand", "Right Arm" }) do
-		local h = character:FindFirstChild(name)
-		if h then
-			local grip = h:FindFirstChild("RightGrip")
-			if grip then pcall(function() grip:Destroy() end) end
-		end
-	end
-end
-
-local function stopServerBarbellTrack(player)
-	local entry = barbellTrackers[player.UserId]
-	if not entry then return end
-	if entry.conn then
-		pcall(function() entry.conn:Disconnect() end)
-	end
-	if entry.handle and entry.handle.Parent then
-		pcall(function() entry.handle.Anchored = false end)
-	end
-	barbellTrackers[player.UserId] = nil
-end
-
-local function startServerBarbellTrack(player, tool, isPlate)
-	stopServerBarbellTrack(player)
-
-	local handle = tool:FindFirstChild("Handle")
-	if not handle then return end
-	local character = tool.Parent
-	if not character or not character:IsA("Model") then return end
-
-	-- Détruit le Motor6D RightGrip natif. Sans ça, Anchored + Motor6D rend
-	-- le character invisible serveur-side.
-	removeRightGripServer(character)
-
-	-- Re-supprime le RightGrip si Roblox tente de le recréer (peut arriver
-	-- après un respawn rapide ou un re-equip).
-	local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-	local gripWatch
-	if rightHand then
-		gripWatch = rightHand.ChildAdded:Connect(function(c)
-			if c.Name == "RightGrip" then
-				pcall(function() c:Destroy() end)
-			end
-		end)
-	end
-
-	handle.Anchored = true
-	handle.CanCollide = false
-	handle.Massless = true
-
-	local entry = { handle = handle, gripWatch = gripWatch, isPlate = isPlate }
-	barbellTrackers[player.UserId] = entry
-
-	-- Placement initial immédiat : sans ça, la barre apparait à sa position
-	-- de Tool.Grip natif (main droite seule) pendant 1-2 frames avant que le
-	-- Heartbeat ne la replace. Équivalent à une itération de la boucle.
-	local function placeBarbell()
-		local char = tool.Parent
-		if not char or not char:IsA("Model") then return end
-		local lh = char:FindFirstChild("LeftHand") or char:FindFirstChild("Left Arm")
-		local rh = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
-		if not lh or not rh then return end
-
-		local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
-		local direction = (rh.Position - lh.Position)
-		if direction.Magnitude > 0.01 then
-			direction = direction.Unit
-			local up = midCFrame.UpVector
-			local look = direction:Cross(up).Unit
-			local right = up:Cross(look).Unit
-			local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
-			if isPlate then
-				handle.CFrame = targetCFrame
-			else
-				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
-			end
-		else
-			handle.CFrame = midCFrame
-		end
-	end
-	placeBarbell()
-
-	-- Heartbeat serveur : calcule la position depuis les hand positions du
-	-- character. L'animator du serveur (lancé par startLiftSessionFor) met
-	-- à jour les Motor6D.Transform des bras même quand le character est
-	-- network-owned par le client, donc lh.CFrame et rh.CFrame reflètent la
-	-- pose animée du curl côté serveur. La barre suit donc le mouvement.
-	entry.conn = RunService.Heartbeat:Connect(function()
-		if not handle or not handle.Parent then
-			if gripWatch then pcall(function() gripWatch:Disconnect() end) end
-			stopServerBarbellTrack(player)
-			return
-		end
-		placeBarbell()
-	end)
-end
+-- NB : on ne touche PLUS au Handle ni au RightGrip Motor6D natif côté serveur.
+-- Toute tentative d'ancrer le Handle ou de détruire le RightGrip créait des
+-- conflits physiques (character invisible, main effacée, brainrot qui tombe
+-- au sol). Le placement de la barre est géré 100% côté client via RenderStepped
+-- (cf. WeightAnimationController) ; le serveur se contente de jouer l'animation
+-- de lift et de gérer les cycles de gain de Power.
 
 -- Anti-spam achat (cash) : empêche un joueur d'envoyer 100 buys par seconde
 -- ce qui spammerait giveWeightTool et noyerait la réplication client
@@ -196,8 +102,94 @@ local function stopLiftSessionFor(player, reason)
 	if session.track then
 		pcall(function() session.track:Stop(0) end)
 	end
+	if session.followConn then
+		pcall(function() session.followConn:Disconnect() end)
+		session.followConn = nil
+	end
+	-- Désancre le Handle pour qu'il puisse retourner au backpack proprement.
+	if session.handle and session.handle.Parent then
+		pcall(function() session.handle.Anchored = false end)
+	end
+	session.handle = nil
 	liftSessions[player.UserId] = nil
 	_ = reason
+end
+
+-- Place le Handle pile entre LeftHand et RightHand chaque frame côté serveur.
+-- Ainsi tous les joueurs (et pas seulement le local) voient la barre tenue
+-- correctement à deux mains, suivant le mouvement de l'animation de lift.
+local function startServerHandleFollow(player, tool)
+	local character = tool.Parent
+	if not character then return nil end
+	local handle = tool:FindFirstChild("Handle")
+	if not handle then return nil end
+
+	local leftHand = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
+	local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+	if not (leftHand and rightHand) then return nil end
+
+	-- Détruit le Motor6D RightGrip natif créé par Roblox sur Equipped pour
+	-- qu'il n'essaie plus d'attacher rigidement le Handle à la main droite
+	-- (sinon conflit avec notre ancrage + CFrame écrit chaque frame).
+	local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+	if rh then
+		local grip = rh:FindFirstChild("RightGrip")
+		if grip then pcall(function() grip:Destroy() end) end
+	end
+
+	-- Ancre côté serveur : ça réplique à TOUS les clients, donc tout le monde
+	-- voit l'ancrage et notre CFrame qui suit les mains.
+	handle.Anchored = true
+
+	local isPlate = PLATE_NAMES[tool.Name] == true
+
+	local function placeNow()
+		if not handle.Parent or not character.Parent then return end
+		local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
+		local rh2 = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+		if not lh or not rh2 then return end
+		local midCFrame = lh.CFrame:Lerp(rh2.CFrame, 0.5)
+		local direction = (rh2.Position - lh.Position)
+		if direction.Magnitude > 0.01 then
+			direction = direction.Unit
+			local up = midCFrame.UpVector
+			local look = direction:Cross(up).Unit
+			local right = up:Cross(look).Unit
+			local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
+			if isPlate then
+				-- Plaque/bloc : on la fait pivoter de 90° autour de Y pour que sa
+				-- face plate soit perpendiculaire au regard du joueur (face avant
+				-- visible face caméra), au lieu de pointer dans l'axe forward
+				-- ce qui faisait dépasser le bloc du torse.
+				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
+			else
+				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
+			end
+		else
+			handle.CFrame = midCFrame
+		end
+	end
+
+	-- Placement initial immédiat pour éviter le "flash" 1 frame à la position
+	-- du Tool.Grip natif avant que Heartbeat ne replace.
+	placeNow()
+
+	local conn
+	conn = RunService.Heartbeat:Connect(function()
+		if not handle.Parent or not character.Parent then
+			if conn then conn:Disconnect() conn = nil end
+			return
+		end
+		-- Si le tool a été déséquipé, on arrête. Le tool dans le backpack n'a
+		-- pas le character pour parent, donc cette condition couvre le cas.
+		if tool.Parent ~= character then
+			if conn then conn:Disconnect() conn = nil end
+			return
+		end
+		placeNow()
+	end)
+
+	return conn, handle
 end
 
 local function startLiftSessionFor(player, tool)
@@ -238,6 +230,12 @@ local function startLiftSessionFor(player, tool)
 	}
 	liftSessions[player.UserId] = session
 	local mySession = session.sessionToken
+
+	-- Lance le suivi serveur du Handle entre les deux mains. Réplique à tous
+	-- les clients, donc les autres joueurs voient aussi la barre bien centrée.
+	local followConn, handle = startServerHandleFollow(player, tool)
+	session.followConn = followConn
+	session.handle = handle
 
 	-- Boucle de gain de Power aliée sur la durée réelle de la track.
 	task.spawn(function()
@@ -294,29 +292,19 @@ local function bindWeightTool(player, tool)
 
 	tool.Equipped:Connect(function()
 		startLiftSessionFor(player, tool)
-		-- Tracking serveur : on drive la barre via Heartbeat pour que tous les
-		-- joueurs (et le serveur) la voient bien placée entre les deux mains.
-		local animId = WeightsConfig.AnimationByWeight[tool.Name]
-		local isPlate = animId ~= WeightsConfig.ANIM_BARBELL
-		startServerBarbellTrack(player, tool, isPlate)
 	end)
 	tool.Unequipped:Connect(function()
 		stopLiftSessionFor(player)
-		stopServerBarbellTrack(player)
 	end)
 	tool.AncestryChanged:Connect(function()
 		if not tool:IsDescendantOf(game) then
 			stopLiftSessionFor(player)
-			stopServerBarbellTrack(player)
 		end
 	end)
 
 	-- Si le tool est créé déjà équipé (rare), démarre tout de suite.
 	if tool.Parent and tool.Parent:FindFirstChildOfClass("Humanoid") then
 		startLiftSessionFor(player, tool)
-		local animId = WeightsConfig.AnimationByWeight[tool.Name]
-		local isPlate = animId ~= WeightsConfig.ANIM_BARBELL
-		startServerBarbellTrack(player, tool, isPlate)
 	end
 end
 
@@ -396,9 +384,13 @@ local function giveWeightTool(player, weightName)
 	tool.Name = weightName
 	tool.CanBeDropped = false
 	tool.RequiresHandle = true
-	-- Grip : centre la barre/plate légèrement devant la main, plutôt que collée
-	-- au poignet. Le Handle suit naturellement la main droite via Roblox.
-	tool.Grip = CFrame.new(0, -0.5, -1)
+	-- Tool.Grip : positionne le Handle relatif à la main droite. On décale
+	-- d'~1 stud sur l'axe X (latéral, positif = vers la main gauche du perso)
+	-- pour que le CENTRE de la barre tombe au milieu des deux mains plutôt
+	-- que sur la main droite. Pas d'offset Z = la barre reste collée contre
+	-- le corps. La rotation 90° autour de Y aligne l'axe long du mesh
+	-- (Z local) avec l'axe latéral, donc la barre est horizontale.
+	tool.Grip = CFrame.new(1, 0, 0) * CFrame.Angles(0, math.rad(90), 0)
 
 	local modelClone = model:Clone()
 	local primaryPart = modelClone:FindFirstChildWhichIsA("BasePart")
@@ -543,7 +535,6 @@ local function onPlayerRemoving(player)
 	lastEquipTime[player.UserId] = nil
 	reorderingGuard[player] = nil
 	stopLiftSessionFor(player)
-	stopServerBarbellTrack(player)
 end
 
 -- ===== REMOTE HANDLERS =====
