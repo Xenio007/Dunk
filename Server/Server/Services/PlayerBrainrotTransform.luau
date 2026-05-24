@@ -223,7 +223,35 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 	local yawForVisual = CFrame.Angles(0, targetYaw, 0)
 
 	local templateRot = template:GetPivot() - template:GetPivot().Position
-	visual:PivotTo(CFrame.new(hrp.Position) * yawForVisual * templateRot * CFrame.Angles(0, math.rad(90), 0))
+
+	-- ===== PANNEAU DE CONTRÔLE D'ORIENTATION DU BRAINROT =====
+	-- Le pivot natif des templates de brainrots n'est pas standardisé : certains
+	-- modèles sont importés couchés sur le flanc, d'autres face contre terre,
+	-- d'autres à l'envers. Ces trois offsets (en DEGRÉS) sont appliqués
+	-- localement APRÈS le yaw du HRP. Joue avec les valeurs 0, 90, -90, 180
+	-- jusqu'à ce que le brainrot soit DEBOUT et REGARDE DEVANT.
+
+	-- Axe X : bascule d'avant en arrière (pencher la tête vers les pieds ou
+	-- vers le ciel). Change ça si le modèle est "face contre terre" ou
+	-- "sur le dos".
+	local offsetRotationX = 180
+
+	-- Axe Y : pivote sur lui-même comme une toupie (rotation autour de l'axe
+	-- vertical). Change ça si le modèle est debout mais regarde sur le côté
+	-- ou complètement vers l'arrière.
+	local offsetRotationY = 180
+
+	-- Axe Z : bascule sur le côté (comme une crêpe qu'on retourne).
+	-- C'est GÉNÉRALEMENT celui-ci qu'il faut ajuster quand le brainrot est
+	-- couché sur le flanc.
+	local offsetRotationZ = -90
+
+	local offsetCF = CFrame.Angles(
+		math.rad(offsetRotationX),
+		math.rad(offsetRotationY),
+		math.rad(offsetRotationZ)
+	)
+	visual:PivotTo(CFrame.new(hrp.Position) * yawForVisual * templateRot * offsetCF)
 
 	-- Aligne le bas du mesh sur les pieds du character (correction Y).
 	local visualBottomY = getWorldMinY(visual)

@@ -1443,8 +1443,8 @@ local function runSequence(player, grade, fill)
 		-- Le modèle inclut souvent des effets/éclats qui débordent la silhouette
 		-- visible. On prend 45% des dims (au lieu de 50%) pour ne déclencher
 		-- BrainrotLost que si la wave touche réellement le brainrot, pas son halo.
-		local halfX = waveMetrics.WaveLengthX * 0.45
-		local halfZ = waveMetrics.WaveWidthZ * 0.45
+		local halfX = waveMetrics.WaveLengthX * 0.6
+		local halfZ = waveMetrics.WaveWidthZ * 0.6
 		-- Axes locaux de la wave (orientée avec lookAt vers fixedDir) :
 		--   LookVector = fixedDir, RightVector = perp horizontal.
 		local rightDir = Vector3.new(-fixedDir.Z, 0, fixedDir.X) -- perp horizontal de fixedDir
@@ -1550,12 +1550,31 @@ local function runSequence(player, grade, fill)
 		--    en mode "vrai skin" avant que LoadCharacter() le detruise.
 		PlayerBrainrotTransform.Remove(player, true)
 
-		-- 2) player:LoadCharacter() detruit instantanement l'ancien Character
-		--    et en respawn un nouveau. Avantages vs Humanoid.Health=0 :
-		--    - Pas de ragdoll visible (l'ancien character disparait avant la chute)
-		--    - Pas de delai d'attente Respawn (CharacterAutoLoads peut etre 5s+)
-		--    - Pas d'ecran de mort, pas de bug de camera fige sur le cadavre
+		-- 2) Tue le joueur via Humanoid.Health = 0 pour declencher le son
+		--    de mort natif de Roblox (LoadCharacter() seul court-circuite le
+		--    systeme de mort et personne n'entend le "oof").
+		local deadChar = player.Character
+		local deadHum = deadChar and deadChar:FindFirstChildOfClass("Humanoid")
+		if deadHum then
+			deadHum.Health = 0
+		end
+
+		-- 3) Micro-delai pour laisser le client entendre le son de mort avant
+		--    qu'on detruise le character via LoadCharacter().
+		task.wait(0.2)
+
+		-- 4) player:LoadCharacter() detruit instantanement l'ancien Character
+		--    (corps ragdoll inclus) et en respawn un nouveau, sans attendre
+		--    les 5s du Respawn natif.
 		player:LoadCharacter()
+
+		-- 5) STOP : on coupe la fonction ici. Sans ce return, la suite de
+		--    runSequence (restauration character, teleport vers originalPlayerCFrame)
+		--    annulerait le respawn en repositionnant le nouveau character a la
+		--    place pre-dunk, donnant l'impression au joueur qu'il n'est jamais mort.
+		dunkSequenceEvent:FireClient(player, "End", {})
+		cleanup()
+		return
 	elseif crossed then
 		-- Le feedback visuel (flash blanc + confettis UI + son) est 100% géré
 		-- côté client dans DunkLuckyBlockController "BrainrotSold". Le serveur

@@ -1722,6 +1722,28 @@ function DunkLuckyBlockController:Start()
 				local tickConn = spinMount.ChildAdded:Connect(function(child)
 					if child:IsA("Model") or child:IsA("BasePart") then
 						playSound2D(ROLL_TICK_SOUND_ID, 0.35)
+
+						-- Oriente le brainrot vers la caméra dès qu'il apparaît.
+						-- camPos est calculé comme dans la boucle RenderStepped
+						-- ci-dessous :
+						--   target = spinMount.Position + (0, 2, 0)
+						--   camPos = target + (7, 1.5, 0)
+						-- On garde la coordonnée Y d'origine du modèle dans le
+						-- lookAtTarget : la rotation est purement horizontale (yaw),
+						-- sinon le brainrot pencherait la tête vers le haut/bas.
+						--
+						-- Compensation X de +90° : les modèles sont modélisés
+						-- "face contre terre" (axe Look = haut du crâne). Sans cette
+						-- rotation locale, lookAt enverrait le sommet du crâne vers la
+						-- caméra et le visage regarderait le sol.
+						local target = spinMount.Position + Vector3.new(0, 2, 0)
+						local camPos = target + Vector3.new(7, 1.5, 0)
+						local modelPos = child:GetPivot().Position
+						local lookAtTarget = Vector3.new(camPos.X, modelPos.Y, camPos.Z)
+						child:PivotTo(
+							CFrame.lookAt(modelPos, lookAtTarget)
+							* CFrame.Angles(math.rad(90), 0, 0)
+						)
 					end
 				end)
 				spinMount.AncestryChanged:Connect(function(_, parent)
