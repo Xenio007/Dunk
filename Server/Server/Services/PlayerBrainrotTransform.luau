@@ -224,18 +224,34 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 
 	local templateRot = template:GetPivot() - template:GetPivot().Position
 
-	-- ===== ROTATION FIXE DU BRAINROT =====
-	-- La rotation locale du brainrot par rapport au HRP est constante. On la
-	-- définit une seule fois ici, puis on la fige dans le C0 du Weld plus bas.
-	-- Avantage : le visual suit automatiquement le yaw du HRP quand le joueur
-	-- tourne (Weld.Part0 = HRP), sans que le modèle ne tente une rotation
-	-- propre frame par frame qui pouvait causer des décalages visuels.
-	local fixedRot = CFrame.Angles(math.rad(180), math.rad(180), math.rad(-90))
+	-- ===== PANNEAU DE CONTRÔLE D'ORIENTATION DU BRAINROT =====
+	-- Le pivot natif des templates de brainrots n'est pas standardisé : certains
+	-- modèles sont importés couchés sur le flanc, d'autres face contre terre,
+	-- d'autres à l'envers. Ces trois offsets (en DEGRÉS) sont appliqués
+	-- localement APRÈS le yaw du HRP. Joue avec les valeurs 0, 90, -90, 180
+	-- jusqu'à ce que le brainrot soit DEBOUT et REGARDE DEVANT.
 
-	-- Pose initiale alignée sur le HRP avec la rotation fixe : sert uniquement
-	-- à mesurer le yOffset (alignement des pieds). Le Weld prendra ensuite le
-	-- relais pour suivre le HRP.
-	visual:PivotTo(hrp.CFrame * fixedRot)
+	-- Axe X : bascule d'avant en arrière (pencher la tête vers les pieds ou
+	-- vers le ciel). Change ça si le modèle est "face contre terre" ou
+	-- "sur le dos".
+	local offsetRotationX = 180
+
+	-- Axe Y : pivote sur lui-même comme une toupie (rotation autour de l'axe
+	-- vertical). Change ça si le modèle est debout mais regarde sur le côté
+	-- ou complètement vers l'arrière.
+	local offsetRotationY = 180
+
+	-- Axe Z : bascule sur le côté (comme une crêpe qu'on retourne).
+	-- C'est GÉNÉRALEMENT celui-ci qu'il faut ajuster quand le brainrot est
+	-- couché sur le flanc.
+	local offsetRotationZ = 180
+
+	local offsetCF = CFrame.Angles(
+		math.rad(offsetRotationX),
+		math.rad(offsetRotationY),
+		math.rad(offsetRotationZ)
+	)
+	visual:PivotTo(CFrame.new(hrp.Position) * yawForVisual * templateRot * offsetCF)
 
 	-- Aligne le bas du mesh sur les pieds du character (correction Y).
 	local visualBottomY = getWorldMinY(visual)
@@ -255,15 +271,15 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 		end
 	end
 
-	-- Weld la PrimaryPart au HRP du character. C0 = rotation FIXE + offset Y
-	-- pour aligner les pieds. Comme c'est un Weld classique avec C0 fixé, le
-	-- visual suit naturellement chaque rotation du HRP (yaw quand le joueur
-	-- avance) sans que le modèle ne tente sa propre rotation.
+	-- Weld la PrimaryPart au HRP du character via Weld classique. Le visuel
+	-- est ensuite parente DANS le character (comme un accessoire). Avec un
+	-- Weld classique parente DANS le character, le visuel suit le HRP
+	-- naturellement sans interferer avec le Humanoid ni le mouvement.
 	local weld = Instance.new("Weld")
 	weld.Name = "BrainrotVisualWeld"
 	weld.Part0 = hrp
 	weld.Part1 = visualPrimary
-	weld.C0 = CFrame.new(0, yOffset, 0) * fixedRot
+	weld.C0 = hrp.CFrame:ToObjectSpace(visualPrimary.CFrame)
 	weld.C1 = CFrame.new()
 	weld.Parent = visualPrimary
 

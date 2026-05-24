@@ -828,6 +828,26 @@ function DunkLuckyBlockController:Start()
 			frozenStateConn = nil
 		end
 
+		-- La Backpack Roblox par défaut doit rester désactivée en permanence :
+		-- le SatchelController fournit une hotbar custom à sa place. On ne la
+		-- réactive jamais, même après la phase brainrot. (Avant cette correction
+		-- on appelait SetCoreGuiEnabled(Backpack, true), ce qui faisait
+		-- réapparaître la barre Roblox basique à côté du satchel custom.)
+		pcall(function()
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+		end)
+
+		-- Réactive la hotbar CUSTOM du SatchelController (cachée pendant la
+		-- phase brainrot via takeControl). MAIS : on ne la rallume PAS si le
+		-- joueur est encore dans la KickReady (flag posé par KickZoneController).
+		-- Sinon la barre clignote visible 1 frame après un BrainrotSold avant que
+		-- KickZoneController.onEnterZone (qui ne refire plus puisque inKickZone=true)
+		-- ne puisse la recacher.
+		local satchelHotbar = playerGui:FindFirstChild("SatchelHotbar")
+		if satchelHotbar and not _G.SatchelEquipBlocked then
+			satchelHotbar.Enabled = true
+		end
+
 		-- Réactive les contrôles natifs du PlayerModule. DunkGameController les
 		-- a desactives via controls:Disable() pendant l'animation de tir et
 		-- personne ne les rallume avant ici. Sans ce bloc, joystick mobile et
@@ -891,6 +911,36 @@ function DunkLuckyBlockController:Start()
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		local hrp = character:FindFirstChild("HumanoidRootPart")
 		if not humanoid or not hrp then return end
+
+		-- Désactive la hotbar (sac à dos) pendant toute la phase brainrot pour
+		-- empêcher le joueur d'équiper un weight ou un brainrot existant. La
+		-- hotbar est réactivée dans releaseControl.
+		pcall(function()
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+		end)
+
+		-- Cache aussi la hotbar CUSTOM du SatchelController (ScreenGui séparé
+		-- nommé "SatchelHotbar"). C'est la barre 1-9 visible à l'écran ; sans
+		-- la désactiver explicitement elle reste affichée pendant la phase
+		-- brainrot. Réactivée dans releaseControl.
+		local satchelHotbar = playerGui:FindFirstChild("SatchelHotbar")
+		if satchelHotbar then
+			satchelHotbar.Enabled = false
+		end
+		local satchelInventory = playerGui:FindFirstChild("SatchelInventory")
+		if satchelInventory then
+			satchelInventory.Enabled = false
+		end
+
+		-- Joue le son spécifique du brainrot dès la prise de contrôle (en plus
+		-- du son déjà joué plus tard dans playSoldFeedback). Ça donne un feedback
+		-- immédiat "j'ai un brainrot, voici son cri". Si le brainrot n'a pas de
+		-- Sound dans BrainrotsModule, on joue rien (pas de fallback générique
+		-- ici, c'est ce que fait playSoldFeedback à la fin).
+		local brainrotSoundId = getBrainrotSoundId(brainrotName)
+		if brainrotSoundId then
+			playSound2D(brainrotSoundId, 0.9)
+		end
 
 		-- Cleanup au cas où une transformation précédente serait encore active
 		-- (cas du fallback dans WaveChase si BrainrotPicked a été raté).

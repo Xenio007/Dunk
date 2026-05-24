@@ -26,6 +26,7 @@ local buyWeightRobuxEvent
 local equipWeightEvent
 local weightDataEvent
 local addPowerEvent
+local handleCFrameEvent
 local DataService
 
 -- Anti-spam lifting
@@ -44,6 +45,118 @@ local LENGTH_WAIT_TIMEOUT = 2.0
 --     sessionToken = number,  -- invalidé quand on équipe / déséquipe
 -- }
 local liftSessions = {}
+
+-- Tracking serveur de la barbell : positionne le Handle au milieu des deux
+-- mains (Heartbeat) pour que TOUS les joueurs voient la barre tenue à deux
+-- mains. C'est le SERVEUR qui drive le placement, pas le client.
+--
+-- Pourquoi on doit détruire le RightGrip natif : quand un Tool est équipé,
+-- Roblox crée automatiquement un Motor6D "RightGrip" entre RightHand et
+-- Handle. Si on ancre le Handle (nécessaire pour driver son CFrame chaque
+-- frame sans bagarre avec la physique), le Motor6D + part ancrée forme une
+-- chaîne invalide -> Roblox cache l'assembly entière du character. En
+-- détruisant le RightGrip on élimine le conflit ; on tient la barre
+-- visuellement via notre CFrame qui suit les deux mains.
+--
+-- [player.UserId] = { conn = RBXScriptConnection, handle = BasePart }
+local barbellTrackers = {}
+
+local function removeRightGripServer(character)
+	for _, name in ipairs({ "RightHand", "Right Arm" }) do
+		local h = character:FindFirstChild(name)
+		if h then
+			local grip = h:FindFirstChild("RightGrip")
+			if grip then pcall(function() grip:Destroy() end) end
+		end
+	end
+end
+
+local function stopServerBarbellTrack(player)
+	local entry = barbellTrackers[player.UserId]
+	if not entry then return end
+	if entry.conn then
+		pcall(function() entry.conn:Disconnect() end)
+	end
+	if entry.handle and entry.handle.Parent then
+		pcall(function() entry.handle.Anchored = false end)
+	end
+	barbellTrackers[player.UserId] = nil
+end
+
+local function startServerBarbellTrack(player, tool, isPlate)
+	stopServerBarbellTrack(player)
+
+	local handle = tool:FindFirstChild("Handle")
+	if not handle then return end
+	local character = tool.Parent
+	if not character or not character:IsA("Model") then return end
+
+	-- Détruit le Motor6D RightGrip natif. Sans ça, Anchored + Motor6D rend
+	-- le character invisible serveur-side.
+	removeRightGripServer(character)
+
+	-- Re-supprime le RightGrip si Roblox tente de le recréer (peut arriver
+	-- après un respawn rapide ou un re-equip).
+	local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+	local gripWatch
+	if rightHand then
+		gripWatch = rightHand.ChildAdded:Connect(function(c)
+			if c.Name == "RightGrip" then
+				pcall(function() c:Destroy() end)
+			end
+		end)
+	end
+
+	handle.Anchored = true
+	handle.CanCollide = false
+	handle.Massless = true
+
+	local entry = { handle = handle, gripWatch = gripWatch, isPlate = isPlate }
+	barbellTrackers[player.UserId] = entry
+
+	-- Placement initial immédiat : sans ça, la barre apparait à sa position
+	-- de Tool.Grip natif (main droite seule) pendant 1-2 frames avant que le
+	-- Heartbeat ne la replace. Équivalent à une itération de la boucle.
+	local function placeBarbell()
+		local char = tool.Parent
+		if not char or not char:IsA("Model") then return end
+		local lh = char:FindFirstChild("LeftHand") or char:FindFirstChild("Left Arm")
+		local rh = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+		if not lh or not rh then return end
+
+		local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
+		local direction = (rh.Position - lh.Position)
+		if direction.Magnitude > 0.01 then
+			direction = direction.Unit
+			local up = midCFrame.UpVector
+			local look = direction:Cross(up).Unit
+			local right = up:Cross(look).Unit
+			local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
+			if isPlate then
+				handle.CFrame = targetCFrame
+			else
+				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
+			end
+		else
+			handle.CFrame = midCFrame
+		end
+	end
+	placeBarbell()
+
+	-- Heartbeat serveur : calcule la position depuis les hand positions du
+	-- character. L'animator du serveur (lancé par startLiftSessionFor) met
+	-- à jour les Motor6D.Transform des bras même quand le character est
+	-- network-owned par le client, donc lh.CFrame et rh.CFrame reflètent la
+	-- pose animée du curl côté serveur. La barre suit donc le mouvement.
+	entry.conn = RunService.Heartbeat:Connect(function()
+		if not handle or not handle.Parent then
+			if gripWatch then pcall(function() gripWatch:Disconnect() end) end
+			stopServerBarbellTrack(player)
+			return
+		end
+		placeBarbell()
+	end)
+end
 
 -- Anti-spam achat (cash) : empêche un joueur d'envoyer 100 buys par seconde
 -- ce qui spammerait giveWeightTool et noyerait la réplication client
@@ -181,19 +294,29 @@ local function bindWeightTool(player, tool)
 
 	tool.Equipped:Connect(function()
 		startLiftSessionFor(player, tool)
+		-- Tracking serveur : on drive la barre via Heartbeat pour que tous les
+		-- joueurs (et le serveur) la voient bien placée entre les deux mains.
+		local animId = WeightsConfig.AnimationByWeight[tool.Name]
+		local isPlate = animId ~= WeightsConfig.ANIM_BARBELL
+		startServerBarbellTrack(player, tool, isPlate)
 	end)
 	tool.Unequipped:Connect(function()
 		stopLiftSessionFor(player)
+		stopServerBarbellTrack(player)
 	end)
 	tool.AncestryChanged:Connect(function()
 		if not tool:IsDescendantOf(game) then
 			stopLiftSessionFor(player)
+			stopServerBarbellTrack(player)
 		end
 	end)
 
 	-- Si le tool est créé déjà équipé (rare), démarre tout de suite.
 	if tool.Parent and tool.Parent:FindFirstChildOfClass("Humanoid") then
 		startLiftSessionFor(player, tool)
+		local animId = WeightsConfig.AnimationByWeight[tool.Name]
+		local isPlate = animId ~= WeightsConfig.ANIM_BARBELL
+		startServerBarbellTrack(player, tool, isPlate)
 	end
 end
 
@@ -420,6 +543,7 @@ local function onPlayerRemoving(player)
 	lastEquipTime[player.UserId] = nil
 	reorderingGuard[player] = nil
 	stopLiftSessionFor(player)
+	stopServerBarbellTrack(player)
 end
 
 -- ===== REMOTE HANDLERS =====
@@ -576,6 +700,19 @@ function WeightService:Init()
 	equipWeightEvent = RemotesAPI.GetEvent("EquipWeightEvent")
 	weightDataEvent = RemotesAPI.GetEvent("WeightDataEvent")
 	addPowerEvent = RemotesAPI.GetEvent("AddPowerEvent")
+
+	-- UnreliableRemoteEvent pour le streaming haute-fréquence du CFrame du
+	-- Handle. Ne ré-essaie pas en cas de paquet perdu (= moins de buffering)
+	-- et a une latence plus basse qu'un RemoteEvent classique. Parfait pour
+	-- du tracking continu où un paquet raté est immédiatement remplacé par
+	-- le suivant.
+	local remotesFolder = RemotesAPI.GetFolder()
+	handleCFrameEvent = remotesFolder:FindFirstChild("WeightHandleCFrameEvent")
+	if not handleCFrameEvent then
+		handleCFrameEvent = Instance.new("UnreliableRemoteEvent")
+		handleCFrameEvent.Name = "WeightHandleCFrameEvent"
+		handleCFrameEvent.Parent = remotesFolder
+	end
 end
 
 function WeightService:Start()

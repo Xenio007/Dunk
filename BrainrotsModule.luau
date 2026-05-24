@@ -686,7 +686,7 @@ for _, v_2 in ipairs(module_upvr.VARIANTS) do
 			["Esok Sekolah"] = "rbxassetid://105452737814425";
 			["Fluri Flura"] = "rbxassetid://100868549014186";
 			["Frigo Camelo"] = "rbxassetid://72197665978728";
-			["Garamararam" = "rbxassetid://84505801973595";
+			["Garamararam"] = "rbxassetid://84505801973595";
 			["Gangster Footera"] = "rbxassetid://136981476880085";
 			["Girafa Celeste"] = "rbxassetid://110781536143880";
 			["Glorbo Fruttodrillo"] = "rbxassetid://120895017029745";
@@ -1107,7 +1107,7 @@ for _, v_2 in ipairs(module_upvr.VARIANTS) do
 			["Odin Din Din Dun"] = "rbxassetid://96060263010297";
 			["Orangutini Ananassini"] = "rbxassetid://73544836687411";
 			["Orcalero Orcala"] = "rbxassetid://105144586250832";
-			["Pakrahmatmama"]t = "rbxassetid://91763780815282";
+			["Pakrahmatmama" = "rbxassetid://91763780815282";
 			["Pakrahmatmatina"] = "rbxassetid://96967436611342";
 			["Pandaccini Bananini"] = "rbxassetid://122592150806534";
 			["Pipi Kiwi"] = "rbxassetid://139141374985134";

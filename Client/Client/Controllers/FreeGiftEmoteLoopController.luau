@@ -79,6 +79,27 @@ function FreeGiftEmoteLoopController:Start()
 			task.delay(0.2, playLoopFor, child)
 		end
 	end)
+
+	-- Brainrots stationnaires placés aux shops / sell pour faire vivre le spawn.
+	-- Même structure que les Gangster Footera (AnimationController + Anims.Idle).
+	local extraBrainrotPaths = {
+		{ parent = { "Spawn", "Sell" },                  name = "Matteo" },
+		{ parent = { "Spawn", "Shops", "WeightShop" },   name = "Bananini Kittini" },
+		{ parent = { "Spawn", "Shops", "SpeedShop" },    name = "Tim Cheese" },
+	}
+	for _, info in ipairs(extraBrainrotPaths) do
+		task.spawn(function()
+			local node = Workspace
+			for _, segment in ipairs(info.parent) do
+				node = node:WaitForChild(segment, 30)
+				if not node then return end
+			end
+			local model = node:WaitForChild(info.name, 30)
+			if model then
+				playLoopFor(model)
+			end
+		end)
+	end
 end
 
 return FreeGiftEmoteLoopController

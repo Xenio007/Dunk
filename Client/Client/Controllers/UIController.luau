@@ -10,6 +10,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 local StarterGui = game:GetService("StarterGui")
+local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
@@ -31,6 +32,23 @@ local function formatNumber(num)
 	else
 		return tostring(n)
 	end
+end
+
+-- Anim pop-in réutilisée pour les frames ouvertes via TouchPart (LikeFrame du
+-- FreeGift). MenuAnimationController gère déjà le même effet via le UIScale
+-- "_MenuAnimScale", on le redéclenche manuellement ici pour garantir le pop
+-- à chaque ouverture.
+local POP_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local POP_FROM = 0.6
+local function playFramePopIn(frame)
+	local scale = frame:FindFirstChild("_MenuAnimScale")
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Name = "_MenuAnimScale"
+		scale.Parent = frame
+	end
+	scale.Scale = POP_FROM
+	TweenService:Create(scale, POP_TWEEN, { Scale = 1 }):Play()
 end
 
 function UIController:Start()
@@ -209,6 +227,7 @@ function UIController:Start()
 			isInGroupZone = true
 			closeAllExcept(likeFrame)
 			likeFrame.Visible = true
+			playFramePopIn(likeFrame)
 		end
 	end)
 

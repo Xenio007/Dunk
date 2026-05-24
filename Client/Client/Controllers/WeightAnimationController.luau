@@ -25,6 +25,11 @@ local SoundService = game:GetService("SoundService")
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
 
+-- UnreliableRemoteEvent pour le streaming haute-fréquence du CFrame du Handle.
+-- Latence plus basse + pas de re-transmission qu'un RemoteEvent classique.
+local remotesFolder = ReplicatedStorage:WaitForChild("Remotes")
+local handleCFrameEvent = remotesFolder:WaitForChild("WeightHandleCFrameEvent")
+
 local WeightAnimationController = Loader.CreateController({
 	Name = "WeightAnimationController",
 })
@@ -119,41 +124,39 @@ function WeightAnimationController:Start()
 		-- et sans interférer avec la physique du personnage.
 		handle.Anchored = true
 
+		local function placeNow()
+			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
+			local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
+			if not lh or not rh then return end
+			local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
+			local direction = (rh.Position - lh.Position)
+			if direction.Magnitude > 0.01 then
+				direction = direction.Unit
+				local up = midCFrame.UpVector
+				local look = direction:Cross(up).Unit
+				local right = up:Cross(look).Unit
+				local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
+				if isPlate then
+					handle.CFrame = targetCFrame
+				else
+					handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
+				end
+			else
+				handle.CFrame = midCFrame
+			end
+		end
+
+		-- Placement initial immédiat : sans ça la barre apparait à la position
+		-- Tool.Grip natif (main droite seule) pendant 1 frame avant que le
+		-- RenderStepped ne la replace.
+		placeNow()
+
 		barbellFollowConn = RunService.RenderStepped:Connect(function()
 			if not (handle and handle.Parent) or not (character and character.Parent) then
 				stopBarbellFollow()
 				return
 			end
-			
-			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-			local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-			
-			if lh and rh then
-				-- Position au milieu des deux mains
-				local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
-				
-				-- Ajustement d'orientation : on veut que la barre soit alignée avec
-				-- l'axe entre les deux mains.
-				local direction = (rh.Position - lh.Position).Unit
-				if direction.Magnitude > 0.01 then
-					-- On construit un CFrame dont l'axe transversal est aligné avec les mains.
-					local up = midCFrame.UpVector
-					local look = direction:Cross(up).Unit
-					local right = up:Cross(look).Unit
-					
-					local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
-					
-					-- Petite correction de rotation selon si c'est une barre ou une plaque
-					if isPlate then
-						handle.CFrame = targetCFrame 
-					else
-						-- Pour une barre, on l'oriente perpendiculairement à l'axe des mains
-						handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
-					end
-				else
-					handle.CFrame = midCFrame
-				end
-			end
+			placeNow()
 		end)
 	end
 
@@ -165,30 +168,16 @@ function WeightAnimationController:Start()
 		local handle = tool:FindFirstChild("Handle")
 		if not handle then return end
 
-		local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-		if not rightHand then return end
-
-		-- Défense en profondeur : on forçe Anchored=false sur le Handle ET tous
-		-- les enfants du tool. Si pour quelque raison le Handle arrivait ancré
-		-- (race condition, hot-reload depuis ancienne version), Roblox créerait
-		-- un Motor6D RightGrip entre RightHand libre et Handle ancré → crash.
-		pcall(function() handle.Anchored = false end)
-
-		removeRightGrip(character)
-
-		-- Neutralise la physique sur tout le tool. Tout reste désancré :
-		-- Roblox positionne le tool via le Motor6D RightGrip (cf. Tool.Grip serveur).
-		for _, part in ipairs(tool:GetDescendants()) do
-			if part:IsA("BasePart") then
-				part.CanCollide = false
-				part.Massless = true
-				part.Anchored = false
-			end
-		end
-
 		local animId = WeightsConfig.AnimationByWeight[tool.Name]
 		local isBarbell = (animId == ANIM_BARBELL)
 
+		-- Tracking client (RenderStepped 60fps) : place la barre entre les deux
+		-- mains animées du joueur local. Sans latence parce que c'est calculé
+		-- depuis ses propres mains simulées localement. Le client envoie aussi
+		-- la CFrame au serveur via UnreliableRemoteEvent (écriture cumulée dans
+		-- startBarbellFollow), ce qui synchronise l'affichage pour les autres
+		-- joueurs sans créer de double-source de vérité (le Handle est ancré
+		-- serveur, donc seules les écritures serveur se répliquent).
 		if isBarbell then
 			startBarbellFollow(handle, character, false)
 		else
