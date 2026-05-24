@@ -978,6 +978,15 @@ function DunkLuckyBlockController:Start()
 				hum.JumpPower = targetJump
 				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
 				wasFrozen = false
+				-- Réactive les contrôles natifs au moment exact ou la fuite commence.
+				-- WalkSpeed=0 pendant le freeze peut casser le joystick mobile : il
+				-- faut explicitement controls:Enable() pour qu'il réapparaisse.
+				pcall(function()
+					local PlayerScripts = player:WaitForChild("PlayerScripts")
+					local PlayerModule = require(PlayerScripts:WaitForChild("PlayerModule"))
+					local controls = PlayerModule:GetControls()
+					controls:Enable()
+				end)
 			end
 		end)
 	end
@@ -1483,9 +1492,10 @@ function DunkLuckyBlockController:Start()
 				t = math.clamp(t, 0, 1)
 				local lerpPos = launchOrigin:Lerp(
 					Vector3.new(impactPos.X, launchOrigin.Y, impactPos.Z), t)
-				-- Sommet sinus : courbe symétrique en cloche, sommet à t=0.5,
-				-- vitesse verticale max au départ (gicle) et à l'arrivée (plonge).
-				local parabola = peakHeight * math.sin(math.pi * t)
+				-- Parabole gravitationnelle (4 * t * (1 - t)) : courbe symétrique
+				-- en cloche, sommet à t=0.5, sans stagner au sommet (contrairement à
+				-- math.sin qui plafonne longtemps autour de t=0.5).
+				local parabola = peakHeight * 4 * t * (1 - t)
 				local fallY = launchOrigin.Y + (effectiveLandY - launchOrigin.Y) * t
 				return Vector3.new(lerpPos.X, fallY + parabola, lerpPos.Z)
 			end
@@ -1550,9 +1560,9 @@ function DunkLuckyBlockController:Start()
 				local spinT = elapsed
 				local spinY, spinX, spinZ = 0, 0, 0
 				if grade ~= "PERFECT" then
-					spinY = spinT * math.pi * 0.7
-					spinX = spinT * math.pi * 0.5
-					spinZ = spinT * math.pi * 0.4
+					spinY = spinT * math.pi * 1.8
+					spinX = spinT * math.pi * 1.2
+					spinZ = spinT * math.pi * 1.5
 				end
 
 				-- Swap du skin du Lucky Block selon la zone (rarete) traversee

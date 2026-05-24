@@ -272,6 +272,10 @@ local function playPerfectSequence(player, gradeText, fill)
 		letterboxGui = Instance.new("ScreenGui")
 		letterboxGui.Name = "DunkLetterbox"
 		letterboxGui.IgnoreGuiInset = true
+		-- ScreenInsets.None : force le ScreenGui a couvrir TOUT l'ecran, y compris
+		-- la safe area (encoche, bords sur mobile). Sans ca, sur telephone les
+		-- bandes noires laissent des espaces sur les cotes.
+		letterboxGui.ScreenInsets = Enum.ScreenInsets.None
 		letterboxGui.ResetOnSpawn = false
 		letterboxGui.DisplayOrder = 1000
 		letterboxGui.Parent = playerGui

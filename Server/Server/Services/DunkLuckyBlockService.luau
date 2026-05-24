@@ -906,12 +906,12 @@ local function runSequence(player, grade, fill)
 	-- la distance, comme un projectile réel (vitesse fixe en studs/s).
 	-- Aucun cap : un tir court (~50 studs) prend ~0.25s de vol, un tir long
 	-- (~2700 studs) prend ~12s. L'animation s'étire ou se contracte d'elle-même.
-	local FLIGHT_SPEED_STUDS_PER_SEC = 220
-	local flightDuration = math.max(0.5, distance / FLIGHT_SPEED_STUDS_PER_SEC)
+	local FLIGHT_SPEED_STUDS_PER_SEC = 130
+	local flightDuration = math.max(0.8, distance / FLIGHT_SPEED_STUDS_PER_SEC)
 	-- Arc proportionnel à la distance, sans cap dur mais factor modéré pour
-	-- garder un "U" lisible sans monter trop haut. ~5% de la distance,
-	-- plancher 6 studs pour les courts tirs.
-	local peakHeight = math.max(6, distance * 0.05)
+	-- garder un "U" lisible sans monter trop haut. ~12% de la distance,
+	-- plancher 12 studs pour les courts tirs.
+	local peakHeight = math.max(12, distance * 0.12)
 
 	-- LandY : position Y où le centre du block doit être posé au sol. Le
 	-- client connait la taille réelle du block après son scale local.

@@ -48,6 +48,12 @@ local function ensureCollisionGroup()
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(CLONE_RUNNER_COLLISION_GROUP, CLONE_RUNNER_COLLISION_GROUP, false)
 	end)
+	-- Le clone runner doit aussi traverser les BlockPart (les murs invisibles
+	-- du Sell). Sans cette regle, le clone se cogne et reste bloque devant
+	-- les BlockPart au lieu de passer a travers comme le joueur en brainrot.
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(CLONE_RUNNER_COLLISION_GROUP, "DunkBlockPart", false)
+	end)
 	end
 
 -- ===== Constantes =====
@@ -307,6 +313,26 @@ function DunkCloneService:SpawnClone(player)
 		return nil
 	end
 	clone.Name = "DunkClone_" .. player.Name
+
+	-- ===== RESTAURATION VISUELLE DU SKIN ORIGINAL =====
+	-- Quand le joueur a été transformé en brainrot via PlayerBrainrotTransform :
+	--   1) son character contient un Model "PlayerBrainrotVisual" (le mesh du brainrot),
+	--   2) toutes ses BasePart/Decals sont en Transparency=1 (cachées).
+	-- Le clone hérite de cet état. Résultat : le clone a le skin du brainrot
+	-- au lieu du skin original. On restaure ici en :
+	--   1) détruisant le visuel brainrot du clone,
+	--   2) remettant Transparency=0 sur les parts/decals/textures du clone.
+	local brainrotVisualClone = clone:FindFirstChild("PlayerBrainrotVisual")
+	if brainrotVisualClone then
+		brainrotVisualClone:Destroy()
+	end
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+			d.Transparency = 0
+		elseif d:IsA("Decal") or d:IsA("Texture") then
+			d.Transparency = 0
+		end
+	end
 
 	-- Garde le script Animate pour les anims Idle/Walk/Run après stand-up.
 	for _, child in ipairs(clone:GetChildren()) do
