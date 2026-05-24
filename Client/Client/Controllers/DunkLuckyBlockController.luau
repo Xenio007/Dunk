@@ -821,7 +821,7 @@ function DunkLuckyBlockController:Start()
 		localWaveModel = nil
 	end
 
-	local function releaseControl()
+	local function releaseControl(killedByWave)
 		-- Stoppe la boucle de freeze si elle tourne.
 		if frozenStateConn then
 			frozenStateConn:Disconnect()
@@ -866,7 +866,7 @@ function DunkLuckyBlockController:Start()
 			playerHRP.AssemblyLinearVelocity = Vector3.zero
 			playerHRP.AssemblyAngularVelocity = Vector3.zero
 		end
-		if h then
+		if h and not killedByWave then
 			local protectStart = os.clock()
 			local protectConn
 			protectConn = RunService.Heartbeat:Connect(function()
@@ -1560,9 +1560,9 @@ function DunkLuckyBlockController:Start()
 				local spinT = elapsed
 				local spinY, spinX, spinZ = 0, 0, 0
 				if grade ~= "PERFECT" then
-					spinY = spinT * math.pi * 1.8
-					spinX = spinT * math.pi * 1.2
-					spinZ = spinT * math.pi * 1.5
+					spinY = spinT * math.pi * 0.8
+					spinX = spinT * math.pi * 0.5
+					spinZ = spinT * math.pi * 0.6
 				end
 
 				-- Swap du skin du Lucky Block selon la zone (rarete) traversee
@@ -1981,7 +1981,10 @@ function DunkLuckyBlockController:Start()
 			end
 			destroyLocalWave()
 			shakeCamera(camera, 0.4, 0.5)
-			releaseControl()
+			-- IMPORTANT : on passe killedByWave=true pour que releaseControl ne
+			-- force PAS Health=MaxHealth (le serveur veut tuer le joueur pour
+			-- declencher le respawn natif).
+			releaseControl(true)
 
 			-- Force WalkSpeed/JumpPower pendant 2s pour battre tout cache local
 			-- residuel a 0 (depuis le freeze pendant WaveRise).

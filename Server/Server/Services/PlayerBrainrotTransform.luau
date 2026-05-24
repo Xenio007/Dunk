@@ -161,6 +161,20 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 		end
 	end
 
+	-- Re-active tous les BillboardGui du template ("Billy" : nom / rarete / CPS).
+	-- Souvent ces GUIs sont controles par un script local du template qu'on vient
+	-- de detruire ; sans cette boucle, ils restent invisibles ou non-attaches.
+	-- On force Enabled=true et Adornee=visualPrimary pour qu'ils s'affichent
+	-- au-dessus du mesh weldé au character.
+	for _, d in ipairs(visual:GetDescendants()) do
+		if d:IsA("BillboardGui") then
+			d.Enabled = true
+			if not d.Adornee or not d.Adornee.Parent then
+				d.Adornee = visualPrimary
+			end
+		end
+	end
+
 	-- Parts setup : non-ancrées, no-collide, massless. PivotOffset zeroed pour
 	-- que le pivot soit le centre des parts (évite les décalages bizarres).
 	for _, d in ipairs(visual:GetDescendants()) do
@@ -183,11 +197,33 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 	--      que le brainrot soit dans son orientation naturelle (debout, etc.).
 	-- Sans (2), beaucoup de templates apparaissent couchés ou de travers parce
 	-- que leur pivot a une rotation interne pour les redresser dans le monde.
-	local templateRot = template:GetPivot() - template:GetPivot().Position
 	local hrpLook = hrp.CFrame.LookVector
 	local hrpYaw = math.atan2(-hrpLook.X, -hrpLook.Z)
 	local yawCF = CFrame.Angles(0, hrpYaw, 0)
-	visual:PivotTo(CFrame.new(hrp.Position) * yawCF * templateRot)
+	-- Calcule le yaw du brainrot pour qu'il regarde vers une BlockPart de la
+	-- zone Sell (la cible du joueur). On ignore la composante Y (regard dans
+	-- le plan horizontal seulement) pour que le brainrot reste droit, sans
+	-- pitcher vers le centre vertical de la part. Fallback : si aucune
+	-- BlockPart trouvee, on garde le yaw du HRP du joueur.
+	local targetYaw = hrpYaw
+	local spawnFolder = Workspace:FindFirstChild("Spawn")
+	local sellModel = spawnFolder and spawnFolder:FindFirstChild("Sell")
+	if sellModel then
+		for _, d in ipairs(sellModel:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name == "BlockPart" then
+				local dx = d.Position.X - hrp.Position.X
+				local dz = d.Position.Z - hrp.Position.Z
+				if dx*dx + dz*dz > 0.01 then
+					targetYaw = math.atan2(-dx, -dz)
+				end
+				break
+			end
+		end
+	end
+	local yawForVisual = CFrame.Angles(0, targetYaw, 0)
+
+	local templateRot = template:GetPivot() - template:GetPivot().Position
+	visual:PivotTo(CFrame.new(hrp.Position) * yawForVisual * templateRot * CFrame.Angles(0, math.rad(90), 0))
 
 	-- Aligne le bas du mesh sur les pieds du character (correction Y).
 	local visualBottomY = getWorldMinY(visual)
@@ -253,10 +289,13 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 end
 
 --[[
-	Remove(player)
-	Détruit le visuel brainrot weldé et restaure la visibilité du character.
+	Remove(player, skipRestore)
+	Detruit le visuel brainrot welde. Restaure la visibilite du character
+	SAUF si skipRestore=true (utilise quand on appelle player:LoadCharacter()
+	juste apres : pas la peine de rendre l'ancien character visible une frame
+	avant qu'il soit detruit, ce qui causait un flash visuel du skin original).
 ]]
-function PlayerBrainrotTransform.Remove(player)
+function PlayerBrainrotTransform.Remove(player, skipRestore)
 	if not player then return end
 	local entry = active[player.UserId]
 	if not entry then return end
@@ -265,7 +304,9 @@ function PlayerBrainrotTransform.Remove(player)
 	if entry.visual and entry.visual.Parent then
 		entry.visual:Destroy()
 	end
-	restoreCharacter(entry.savedTransparencies)
+	if not skipRestore then
+		restoreCharacter(entry.savedTransparencies)
+	end
 end
 
 --[[

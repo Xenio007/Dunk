@@ -906,7 +906,7 @@ local function runSequence(player, grade, fill)
 	-- la distance, comme un projectile réel (vitesse fixe en studs/s).
 	-- Aucun cap : un tir court (~50 studs) prend ~0.25s de vol, un tir long
 	-- (~2700 studs) prend ~12s. L'animation s'étire ou se contracte d'elle-même.
-	local FLIGHT_SPEED_STUDS_PER_SEC = 130
+	local FLIGHT_SPEED_STUDS_PER_SEC = 105
 	local flightDuration = math.max(0.8, distance / FLIGHT_SPEED_STUDS_PER_SEC)
 	-- Arc proportionnel à la distance, sans cap dur mais factor modéré pour
 	-- garder un "U" lisible sans monter trop haut. ~12% de la distance,
@@ -1543,6 +1543,19 @@ local function runSequence(player, grade, fill)
 		if toClean and DunkCloneService then
 			DunkCloneService:Cleanup(toClean)
 		end
+
+		-- ===== INSTANT KILL + RESPAWN IMMEDIAT =====
+		-- 1) Retire le visuel brainrot weldé. skipRestore=true : on ne restaure
+		--    PAS la transparence du character d'origine, sinon il flash 1 frame
+		--    en mode "vrai skin" avant que LoadCharacter() le detruise.
+		PlayerBrainrotTransform.Remove(player, true)
+
+		-- 2) player:LoadCharacter() detruit instantanement l'ancien Character
+		--    et en respawn un nouveau. Avantages vs Humanoid.Health=0 :
+		--    - Pas de ragdoll visible (l'ancien character disparait avant la chute)
+		--    - Pas de delai d'attente Respawn (CharacterAutoLoads peut etre 5s+)
+		--    - Pas d'ecran de mort, pas de bug de camera fige sur le cadavre
+		player:LoadCharacter()
 	elseif crossed then
 		-- Le feedback visuel (flash blanc + confettis UI + son) est 100% géré
 		-- côté client dans DunkLuckyBlockController "BrainrotSold". Le serveur
