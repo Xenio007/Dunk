@@ -25,9 +25,9 @@ local MusicMuteController = Loader.CreateController({
 	Name = "MusicMuteController",
 })
 
--- Icônes : haut-parleur normal vs barré. IDs Roblox génériques (free).
-local ICON_SOUND_ON  = "rbxassetid://6031091004"
-local ICON_SOUND_OFF = "rbxassetid://6031094680"
+-- Icônes : haut-parleur normal vs barré.
+local ICON_SOUND_ON  = "rbxassetid://116855826812579"
+local ICON_SOUND_OFF = "rbxassetid://93723984271575"
 
 -- Liste (name dans SoundService.UI.New) des sons considérés comme "musique".
 -- On les récupère dynamiquement plutôt que de les référencer par chemin fixe
@@ -107,6 +107,7 @@ function MusicMuteController:Start()
 	local icon = Icon.new()
 		:setName("MusicMute")
 		:setImage(ICON_SOUND_ON)
+		:setImageScale(1)
 		:setRight()
 		:setCaption("Mute music")
 

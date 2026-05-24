@@ -500,12 +500,28 @@ function BrainrotService:Start()
 		restoreInventory(player)
 	end
 
+	-- D8 : guard d'idempotence pour éviter qu'un même joueur soit hooké deux
+	-- fois (race PlayerAdded vs GetPlayers Studio replay). hookPlayer yield sur
+	-- WaitForChild("Cash") + WaitForChild("Backpack") + while-loop sur le poids ;
+	-- sans guard, deux restoreInventory en parallèle → brainrots dupliqués dans
+	-- le Backpack → exploit Cash via la vente.
+	local hookedPlayers = {}
+	local function hookPlayerOnce(p)
+		if hookedPlayers[p.UserId] then return end
+		hookedPlayers[p.UserId] = true
+		hookPlayer(p)
+	end
+
 	Players.PlayerAdded:Connect(function(player)
-		task.spawn(hookPlayer, player)
+		task.spawn(hookPlayerOnce, player)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		hookedPlayers[player.UserId] = nil
 	end)
 
 	for _, player in ipairs(Players:GetPlayers()) do
-		task.spawn(hookPlayer, player)
+		task.spawn(hookPlayerOnce, player)
 	end
 
 	print("[BrainrotService] Prêt")

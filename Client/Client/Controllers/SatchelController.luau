@@ -546,19 +546,38 @@ applySelection = function()
 		local tool = slot.tool
 		if tool then
 			local isEquipped = character and tool.Parent == character
+			local targetStrokeColor, targetThickness, targetBg
 			if isEquipped then
-				slot.stroke.Color = SLOT_STROKE_SELECTED
-				slot.stroke.Thickness = 3
-				slot.frame.BackgroundColor3 = SLOT_BG_SELECTED
+				targetStrokeColor = SLOT_STROKE_SELECTED
+				targetThickness = 3
+				targetBg = SLOT_BG_SELECTED
 			else
-				slot.stroke.Color = getBorderColorFor(tool)
-				slot.stroke.Thickness = 2
-				slot.frame.BackgroundColor3 = SLOT_BG_COLOR
+				targetStrokeColor = getBorderColorFor(tool)
+				targetThickness = 2
+				targetBg = SLOT_BG_COLOR
+			end
+			-- Optimisation : on écrit la propriété SEULEMENT si elle change.
+			-- Roblox traite chaque écriture comme un signal de réplication UI ;
+			-- en spam, sauter les writes redondants évite les pics CPU/GPU.
+			if slot.stroke.Color ~= targetStrokeColor then
+				slot.stroke.Color = targetStrokeColor
+			end
+			if slot.stroke.Thickness ~= targetThickness then
+				slot.stroke.Thickness = targetThickness
+			end
+			if slot.frame.BackgroundColor3 ~= targetBg then
+				slot.frame.BackgroundColor3 = targetBg
 			end
 		else
-			slot.stroke.Color = SLOT_STROKE_COLOR
-			slot.stroke.Thickness = 2
-			slot.frame.BackgroundColor3 = SLOT_BG_COLOR
+			if slot.stroke.Color ~= SLOT_STROKE_COLOR then
+				slot.stroke.Color = SLOT_STROKE_COLOR
+			end
+			if slot.stroke.Thickness ~= 2 then
+				slot.stroke.Thickness = 2
+			end
+			if slot.frame.BackgroundColor3 ~= SLOT_BG_COLOR then
+				slot.frame.BackgroundColor3 = SLOT_BG_COLOR
+			end
 		end
 	end
 end
@@ -570,6 +589,33 @@ local function findEmptySlotIndex()
 		end
 	end
 	return nil
+end
+
+-- Débounce : quand un Equip déclenche en chaîne 4-5 callbacks (Tool sort du
+-- Backpack → entre dans Character → réplication), on coalesce TOUS les
+-- applySelection / refreshInventoryPanel d'une même frame en UN SEUL appel
+-- via task.defer + un flag. Avant : spam 1-9 = 40+ rebuilds UI/sec, freeze
+-- visible. Après : 1 seul rebuild par frame max.
+local _applyScheduled = false
+local _refreshScheduled = false
+
+local function scheduleApplySelection()
+	if _applyScheduled then return end
+	_applyScheduled = true
+	task.defer(function()
+		_applyScheduled = false
+		applySelection()
+	end)
+end
+
+local function scheduleRefreshInventory()
+	if _refreshScheduled then return end
+	if not refreshInventoryPanel then return end
+	_refreshScheduled = true
+	task.defer(function()
+		_refreshScheduled = false
+		if refreshInventoryPanel then refreshInventoryPanel() end
+	end)
 end
 
 local function releaseTool(tool)
@@ -584,8 +630,8 @@ local function releaseTool(tool)
 		-- le glisser lui-même depuis l'inventaire.
 		clearSlot(slotViews[slotIndex])
 	end
-	applySelection()
-	if refreshInventoryPanel then refreshInventoryPanel() end
+	scheduleApplySelection()
+	scheduleRefreshInventory()
 end
 
 local function hookTool(tool)
@@ -605,20 +651,20 @@ local function assignTool(tool)
 		fillSlot(slotViews[slotIndex], tool)
 	end
 	hookTool(tool)
-	applySelection()
-	if refreshInventoryPanel then refreshInventoryPanel() end
+	scheduleApplySelection()
+	scheduleRefreshInventory()
 end
 
 local function onContainerChildAdded(child)
 	if child:IsA("Tool") then
 		assignTool(child)
-		applySelection()
+		-- assignTool déjà schedule applySelection : pas la peine de re-call.
 	end
 end
 
 local function onContainerChildRemoved(child)
 	if child:IsA("Tool") then
-		task.defer(applySelection)
+		scheduleApplySelection()
 	end
 end
 
@@ -671,6 +717,15 @@ end
 
 -- ===== Interaction =====
 
+-- Cooldown anti-spam : si un joueur martele 1-9, chaque touche déclenche
+-- UnequipTools + EquipTool côté client + 4 hooks ChildAdded/Removed sur
+-- Backpack/Character + serveur qui re-tag les tools + reload des animations.
+-- Sans cooldown, spam 10 touches/s = ~40 callbacks UI/frame + réplication
+-- de 80 reparents/s = chute FPS visible. 0.15s laisse une réactivité fluide
+-- en jeu normal mais coupe le lag du spam.
+local EQUIP_COOLDOWN = 0.15
+local lastEquipAt = 0
+
 local function equipOrUnequipTool(tool)
 	if not tool then return end
 	-- Bloqué pendant les phases où le joueur ne doit pas pouvoir prendre
@@ -678,6 +733,12 @@ local function equipOrUnequipTool(tool)
 	-- boucles d'événement (equip -> unequip -> equip...) qui font crash le
 	-- Studio.
 	if _G.SatchelEquipBlocked then return end
+
+	-- Cooldown anti-spam (cf commentaire ci-dessus).
+	local now = os.clock()
+	if now - lastEquipAt < EQUIP_COOLDOWN then return end
+	lastEquipAt = now
+
 	local character = player.Character
 	if not character then return end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")

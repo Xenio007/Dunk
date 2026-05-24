@@ -22,22 +22,8 @@ local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
 local SpeedConfig = require(ReplicatedStorage:WaitForChild("SpeedConfig"))
 local TweenService = game:GetService("TweenService")
 
--- Anim pop-in identique aux autres frames (gérée par MenuAnimationController
--- via le même UIScale "_MenuAnimScale"). On la redéclare ici pour garantir le
--- pop à chaque ouverture du RunFrame, même si MenuAnimationController ne fire
--- pas (cas observé sur les frames ouvertes via TouchPart).
-local POP_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local POP_FROM = 0.6
-local function playFramePopIn(frame)
-	local scale = frame:FindFirstChild("_MenuAnimScale")
-	if not scale then
-		scale = Instance.new("UIScale")
-		scale.Name = "_MenuAnimScale"
-		scale.Parent = frame
-	end
-	scale.Scale = POP_FROM
-	TweenService:Create(scale, POP_TWEEN, { Scale = 1 }):Play()
-end
+-- RunFrame : MenuAnimationController gère l'animation pop-in automatiquement
+-- via PropertyChangedSignal("Visible"). Pas besoin d'appel manuel ici.
 
 local SpeedShopController = Loader.CreateController({
 	Name = "SpeedShopController",
@@ -355,7 +341,8 @@ function SpeedShopController:Start()
 			isInZone = true
 			refreshUI()
 			runFrame.Visible = true
-			playFramePopIn(runFrame)
+			-- Pas besoin d'appeler playFramePopIn : MenuAnimationController
+			-- déclenche l'anim automatiquement via PropertyChangedSignal("Visible").
 		end
 	end)
 

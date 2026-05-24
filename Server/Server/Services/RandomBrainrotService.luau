@@ -163,24 +163,45 @@ end
 -- ============================================================
 function RandomBrainrotService:HandlePurchase(player, productId)
 	if productId ~= RANDOM_BRAINROT_PRODUCT_ID then return false end
-	if not player or not player.Parent then return false end
+	-- IMPORTANT : pour les Developer Products, dès qu'on reconnaît le productId
+	-- on DOIT retourner true (PurchaseGranted) si l'erreur est permanente.
+	-- Retourner false fait que Roblox renvoie le receipt à chaque rejoin du
+	-- joueur jusqu'à expiration : il a déjà payé et n'aurait toujours rien.
+	-- On retourne donc true partout et on logge un warning visible ("PERTE
+	-- POTENTIELLE") pour pouvoir refund manuellement les rares cas d'échec.
+	if not player or not player.Parent then
+		warn(string.format(
+			"[RandomBrainrotService] PERTE POTENTIELLE — Achat random brainrot reçu pour un joueur déconnecté (productId=%d). Refund manuel requis.",
+			productId
+		))
+		return true
+	end
 
 	local template = pickRandomBrainrotForPlayer(player)
 	if not template then
-		warn("[RandomBrainrotService] " .. player.Name .. " : aucun brainrot éligible (pool Legendary+ vide?)")
-		return false
+		warn(string.format(
+			"[RandomBrainrotService] PERTE POTENTIELLE — %s a payé pour un random brainrot mais aucun template éligible (pool Legendary+ vide ?). Refund manuel requis.",
+			player.Name
+		))
+		return true
 	end
 
 	local brainrotService = Loader.GetService("BrainrotService")
 	if not brainrotService or not brainrotService.GiveBrainrotByName then
-		warn("[RandomBrainrotService] BrainrotService introuvable")
-		return false
+		warn(string.format(
+			"[RandomBrainrotService] PERTE POTENTIELLE — %s a payé pour un random brainrot mais BrainrotService est introuvable. Refund manuel requis.",
+			player.Name
+		))
+		return true
 	end
 
 	local tool = brainrotService:GiveBrainrotByName(player, template.Name)
 	if not tool then
-		warn("[RandomBrainrotService] Échec GiveBrainrotByName pour " .. template.Name)
-		return false
+		warn(string.format(
+			"[RandomBrainrotService] PERTE POTENTIELLE — %s a payé pour un random brainrot (%s) mais GiveBrainrotByName a échoué. Refund manuel requis.",
+			player.Name, template.Name
+		))
+		return true
 	end
 
 	print("[RandomBrainrotService] " .. player.Name .. " a reçu " .. template.Name .. " via product random (depuis index)")

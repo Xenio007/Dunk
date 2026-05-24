@@ -9,6 +9,7 @@ local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local DataStoreService = game:GetService("DataStoreService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
@@ -16,6 +17,44 @@ local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
 local GameService = Loader.CreateService({
 	Name = "GameService",
 })
+
+-- ===== IDEMPOTENCE PROCESS RECEIPT =====
+-- DataStore qui mémorise les PurchaseId déjà traités. Roblox peut renvoyer
+-- le même receipt plusieurs fois (retry réseau, restart serveur, déco entre
+-- achat et grant). Sans ce guard, un même achat de Cash peut être crédité
+-- 2-3 fois → cash infini exploitable. Avec, on reconnaît le PurchaseId déjà
+-- accordé et on répond PurchaseGranted sans rien re-créditer.
+local PURCHASE_HISTORY_STORE = DataStoreService:GetDataStore("PurchaseHistory_v1")
+
+-- Retourne :
+--   true  : on a déjà traité ce purchase, ne RIEN re-créditer mais répondre PurchaseGranted.
+--   false : nouveau purchase, le traiter normalement.
+--   nil   : DataStore HS, on n'a aucune certitude. On retourne NotProcessedYet
+--           pour que Roblox retente plus tard (jamais grant à l'aveugle).
+local function alreadyProcessed(receiptInfo)
+	local key = "P_" .. tostring(receiptInfo.PlayerId) .. "_" .. tostring(receiptInfo.PurchaseId)
+	local ok, value = pcall(function()
+		return PURCHASE_HISTORY_STORE:GetAsync(key)
+	 end)
+	if not ok then
+		warn("[GameService] PurchaseHistory GetAsync KO : " .. tostring(value) ..
+			" (PurchaseId=" .. tostring(receiptInfo.PurchaseId) .. ") — receipt mis en attente.")
+		return nil
+	end
+	return value == true
+end
+
+-- Marque un PurchaseId comme traité. Doit être appelé JUSTE AVANT chaque
+-- return PurchaseGranted dans processReceipt. Le SetAsync est non-bloquant
+-- (pcall) : un échec d'écriture n'empêche pas le grant, mais le prochain
+-- retry Roblox de ce purchase pourrait re-grant. Acceptable car les retries
+-- arrivent rarement et l'écriture finit par réussir au prochain appel.
+local function markProcessed(receiptInfo)
+	local key = "P_" .. tostring(receiptInfo.PlayerId) .. "_" .. tostring(receiptInfo.PurchaseId)
+	pcall(function()
+		PURCHASE_HISTORY_STORE:SetAsync(key, true)
+	end)
+end
 
 -- ===== CONSTANTES =====
 
@@ -531,6 +570,17 @@ local function processReceipt(receiptInfo)
 	local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
 	if not player then return Enum.ProductPurchaseDecision.NotProcessedYet end
 
+	-- IDEMPOTENCE : si on a déjà accordé ce PurchaseId, on confirme à Roblox
+	-- qu'il est traité sans rien re-créditer (sinon double-grant à chaque
+	-- retry réseau / restart serveur).
+	local processed = alreadyProcessed(receiptInfo)
+	if processed == true then
+		return Enum.ProductPurchaseDecision.PurchaseGranted
+	elseif processed == nil then
+		-- DataStore HS : on demande un retry plus tard (ne pas grant à l'aveugle).
+		return Enum.ProductPurchaseDecision.NotProcessedYet
+	end
+
 	-- Achat direct de Cash en Robux
 	local cashReward = CASH_PRODUCTS[receiptInfo.ProductId]
 	if cashReward then
@@ -540,6 +590,7 @@ local function processReceipt(receiptInfo)
 		end
 		cashVal.Value = cashVal.Value + cashReward
 		print("[GameService] " .. player.Name .. " a acheté " .. cashReward .. " Cash (product " .. receiptInfo.ProductId .. ")")
+		markProcessed(receiptInfo)
 		return Enum.ProductPurchaseDecision.PurchaseGranted
 	end
 
@@ -558,6 +609,7 @@ local function processReceipt(receiptInfo)
 
 			skipRebirthEvent:FireClient(player, true, "Skip Rebirth réussi! Rebirth #" .. rebirthsVal.Value .. ", YeetPower conservé!")
 			print("[GameService] " .. player.Name .. " a skip rebirth! Rebirth #" .. rebirthsVal.Value)
+			markProcessed(receiptInfo)
 		else
 			skipRebirthEvent:FireClient(player, false, "Erreur: données non trouvées")
 			return Enum.ProductPurchaseDecision.NotProcessedYet
@@ -569,6 +621,7 @@ local function processReceipt(receiptInfo)
 		if okGp and gpService and gpService.HandlePurchase then
 			local handled = gpService:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -578,6 +631,7 @@ local function processReceipt(receiptInfo)
 		if okProd and prodService and prodService.HandlePurchase then
 			local handled = prodService:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -588,6 +642,7 @@ local function processReceipt(receiptInfo)
 		if okRnd and rndService and rndService.HandlePurchase then
 			local handled = rndService:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -597,6 +652,7 @@ local function processReceipt(receiptInfo)
 		if okSteal and stealService and stealService.HandlePurchase then
 			local handled = stealService:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -605,6 +661,7 @@ local function processReceipt(receiptInfo)
 		if okSteal and stealService and stealService.HandleUpgradePurchase then
 			local handled = stealService:HandleUpgradePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -613,6 +670,7 @@ local function processReceipt(receiptInfo)
 		if okSteal and stealService and stealService.HandleMaxUpgradePurchase then
 			local handled = stealService:HandleMaxUpgradePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -622,6 +680,7 @@ local function processReceipt(receiptInfo)
 		if okGet and weightService then
 			local handled = weightService:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -631,6 +690,7 @@ local function processReceipt(receiptInfo)
 		if okSL and serverLuck and serverLuck.HandlePurchase then
 			local handled = serverLuck:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -640,6 +700,7 @@ local function processReceipt(receiptInfo)
 		if okOff and offlineSvc and offlineSvc.HandlePurchase then
 			local handled = offlineSvc:HandlePurchase(player, receiptInfo.ProductId)
 			if handled then
+				markProcessed(receiptInfo)
 				return Enum.ProductPurchaseDecision.PurchaseGranted
 			end
 		end
@@ -647,6 +708,7 @@ local function processReceipt(receiptInfo)
 		return Enum.ProductPurchaseDecision.NotProcessedYet
 	end
 
+	markProcessed(receiptInfo)
 	return Enum.ProductPurchaseDecision.PurchaseGranted
 end
 
@@ -662,13 +724,25 @@ function GameService:Init()
 	floorsTemplates = ReplicatedStorage:WaitForChild("Floors")
 end
 
+-- D8 : guard d'idempotence pour éviter qu'un même joueur soit traité deux fois
+-- (une fois par PlayerAdded, une fois par la boucle GetPlayers du Studio replay).
+local hookedPlayers = {}
+local function hookPlayerOnce(player)
+	if hookedPlayers[player.UserId] then return end
+	hookedPlayers[player.UserId] = true
+	onPlayerAdded(player)
+end
+
 function GameService:Start()
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	Players.PlayerAdded:Connect(hookPlayerOnce)
+	Players.PlayerRemoving:Connect(function(player)
+		hookedPlayers[player.UserId] = nil
+		onPlayerRemoving(player)
+	end)
 
 	-- Rattrapage joueurs déjà connectés (Studio)
 	for _, player in ipairs(Players:GetPlayers()) do
-		task.spawn(onPlayerAdded, player)
+		task.spawn(hookPlayerOnce, player)
 	end
 
 	rebirthEvent.OnServerEvent:Connect(onRebirth)

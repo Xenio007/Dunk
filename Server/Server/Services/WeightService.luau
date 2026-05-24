@@ -706,20 +706,42 @@ function WeightService:Init()
 	end
 end
 
+-- D8 : guard d'idempotence pour éviter qu'un même joueur soit traité deux
+-- fois (race entre PlayerAdded:Connect et la boucle GetPlayers du Studio
+-- replay). Sans ça, waitForProfile peut spawner 2x giveWeightTool en parallèle
+-- → deux Tools dupliqués du même poids → exploit Cash via la vente.
+local hookedPlayers = {}
+local function hookPlayerOnce(player)
+	if hookedPlayers[player.UserId] then return end
+	hookedPlayers[player.UserId] = true
+	onPlayerAdded(player)
+end
+
 function WeightService:Start()
 	DataService = Loader.GetService("DataService")
 
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	Players.PlayerAdded:Connect(hookPlayerOnce)
+	Players.PlayerRemoving:Connect(function(player)
+		hookedPlayers[player.UserId] = nil
+		onPlayerRemoving(player)
+	end)
 
 	for _, player in ipairs(Players:GetPlayers()) do
-		task.spawn(onPlayerAdded, player)
+		task.spawn(hookPlayerOnce, player)
 	end
 
 	buyWeightEvent.OnServerEvent:Connect(onBuyWithCash)
 	buyWeightRobuxEvent.OnServerEvent:Connect(onBuyWithRobux)
 	equipWeightEvent.OnServerEvent:Connect(onEquip)
-	addPowerEvent.OnServerEvent:Connect(onAddPower)
+	-- AddPowerEvent.OnServerEvent SUPPRIMÉ pour des raisons de sécurité.
+	-- Le serveur conduit déjà entièrement le cycle de gain de Power dans
+	-- startLiftSessionFor (boucle alignée sur la durée de l'animation de lift).
+	-- Laisser ce hook ouvert permettait à un exploiteur de spammer FireServer
+	-- toutes les LIFT_COOLDOWN secondes pour gagner du Power sans même soulever
+	-- (faille critique de génération de Power). L'event reste défini car le
+	-- serveur l'utilise toujours pour FireClient (popup visuel du gain), mais
+	-- il n'écoute plus les requêtes du client.
+	-- addPowerEvent.OnServerEvent:Connect(onAddPower)
 
 	-- Filet de sécurité : on ne polle PAS en permanence. Les hooks ChildAdded /
 	-- Removed sont suffisants dans 99% des cas. Si un edge case surgit (perte de

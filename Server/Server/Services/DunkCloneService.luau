@@ -54,7 +54,15 @@ local function ensureCollisionGroup()
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(CLONE_RUNNER_COLLISION_GROUP, "DunkBlockPart", false)
 	end)
-	end
+	-- Le clone runner doit AUSSI traverser les joueurs transformés en brainrot.
+	-- Sans cette regle, le clone d'un joueur A se cogne dans le brainrot du
+	-- joueur B (et inversement) qui croise sa trajectoire.
+	-- DunkLuckyBlockService:Init pre-registre les deux groupes, donc à ce stade
+	-- ils existent forcément.
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(CLONE_RUNNER_COLLISION_GROUP, "DunkBrainrot", false)
+	end)
+end
 
 -- ===== Constantes =====
 local MAX_CLONE_LIFETIME = 60

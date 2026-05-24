@@ -394,18 +394,50 @@ function DunkLuckyBlockController:Start()
 	local topFrame = topBar and topBar:WaitForChild("Top", 15)
 	local topPlayerImage = topFrame and topFrame:WaitForChild("Player", 15)
 
-	-- Image de la tête du joueur (headshot Roblox).
-	if topPlayerImage then
-		local Players = game:GetService("Players")
-		task.spawn(function()
-			local ok, url = pcall(function()
+	-- POLISH P3 : chargement RÉSILIENT de la HeadShot du joueur.
+	-- Ancien code : un seul appel à GetUserThumbnailAsync dans un pcall. Si
+	-- l'API Roblox timeout/fail à ce moment précis, l'image reste vide pour
+	-- TOUTE la session du joueur. On met maintenant en place :
+	--   1) Cache : URL stockée une fois résolue (pas de re-spam de l'API
+	--      à chaque ouverture de Dunk).
+	--   2) Retry exponentiel : 6 tentatives avec backoff (1s, 2s, 4s, 8s,
+	--      16s, 32s = ~63s total) pour résister aux glitches réseau.
+	--   3) Lecture du flag isReady : GetUserThumbnailAsync retourne
+	--      (content, isReady). Quand isReady=false, l'image n'est pas encore
+	--      prête côté Roblox même si l'appel a succeed. On retry plus tard.
+	local cachedThumbnailUrl = nil
+	local function loadPlayerThumbnail()
+		if cachedThumbnailUrl then
+			return cachedThumbnailUrl
+		end
+		local delays = { 1, 2, 4, 8, 16, 32 }
+		for attempt = 1, #delays do
+			local ok, url, isReady = pcall(function()
 				return Players:GetUserThumbnailAsync(
 					player.UserId,
 					Enum.ThumbnailType.HeadShot,
 					Enum.ThumbnailSize.Size150x150
 				)
 			end)
-			if ok and url then
+			if ok and url and url ~= "" and isReady ~= false then
+				cachedThumbnailUrl = url
+				return url
+			end
+			warn(string.format(
+				"[DunkLuckyBlockController] HeadShot tentative %d/%d échouée (ok=%s, isReady=%s) : %s",
+				attempt, #delays, tostring(ok), tostring(isReady), tostring(url)
+			))
+			task.wait(delays[attempt])
+		end
+		warn("[DunkLuckyBlockController] Impossible de charger la HeadShot après 6 tentatives")
+		return nil
+	end
+
+	-- Image de la tête du joueur (headshot Roblox).
+	if topPlayerImage then
+		task.spawn(function()
+			local url = loadPlayerThumbnail()
+			if url and topPlayerImage and topPlayerImage.Parent then
 				topPlayerImage.Image = url
 			end
 		end)

@@ -43,6 +43,30 @@ local VARIANTS = {
 
 local DataService
 
+-- D5 : tracking des connexions par joueur pour pouvoir les disconnect
+-- au PlayerRemoving. Sans ça, chaque CharacterAdded ajoute une nouvelle
+-- ChildAdded:Connect sur Backpack/Character qui n'est jamais coupée → fuite
+-- mémoire serveur + cascade de callbacks à chaque ajout de Tool (50 connexions
+-- actives après 50 respawns d'un même joueur).
+local hookConnections = {} -- [userId] = { RBXScriptConnection, ... }
+
+local function disconnectPlayerHooks(userId)
+	local conns = hookConnections[userId]
+	if not conns then return end
+	for _, c in ipairs(conns) do
+		if typeof(c) == "RBXScriptConnection" then
+			pcall(function() c:Disconnect() end)
+		end
+	end
+	hookConnections[userId] = nil
+end
+
+local function trackConnection(player, conn)
+	if not conn then return end
+	hookConnections[player.UserId] = hookConnections[player.UserId] or {}
+	table.insert(hookConnections[player.UserId], conn)
+end
+
 -- Retourne un set { variant -> { baseName -> true } } construit à partir des
 -- fullNames découverts du joueur.
 local function buildDiscoveryBuckets(player)
@@ -110,11 +134,13 @@ end
 local function hookContainer(player, container)
 	if not container then return end
 	scanContainer(player, container)
-	container.ChildAdded:Connect(function(child)
+	local conn = container.ChildAdded:Connect(function(child)
 		if child:IsA("Tool") and BrainrotInfo.GetInfo(child.Name) then
 			BrainrotDiscoveryService:MarkDiscovered(player, child.Name)
 		end
 	end)
+	-- D5 : track la connexion pour la disconnect au PlayerRemoving.
+	trackConnection(player, conn)
 end
 
 -- Au spawn : récupère tout ce que le joueur a déjà (inventaire persisté +
@@ -137,6 +163,12 @@ local function importExistingBrainrots(player)
 end
 
 local function onPlayerAdded(player)
+	-- D8 : guard d'idempotence. Si onPlayerAdded est appelé deux fois pour le
+	-- même joueur (race entre PlayerAdded:Connect et la boucle GetPlayers du
+	-- Studio replay), on évite de doubler les hooks.
+	if hookConnections[player.UserId] then return end
+	hookConnections[player.UserId] = {}
+
 	-- Attend que DataService ait chargé le profil (critère : "Cash" posé par
 	-- DataService:onPlayerAdded). Sans ça les API MarkBrainrotDiscovered sont
 	-- no-op car le profil est nil.
@@ -155,14 +187,16 @@ local function onPlayerAdded(player)
 	local backpack = player:FindFirstChildOfClass("Backpack") or player:WaitForChild("Backpack", 10)
 	if backpack then hookContainer(player, backpack) end
 
-	player.ChildAdded:Connect(function(child)
+	local childAddedConn = player.ChildAdded:Connect(function(child)
 		if child:IsA("Backpack") then
 			hookContainer(player, child)
 		end
 	end)
+	trackConnection(player, childAddedConn)
 
 	if player.Character then bindCharacter(player.Character) end
-	player.CharacterAdded:Connect(bindCharacter)
+	local charAddedConn = player.CharacterAdded:Connect(bindCharacter)
+	trackConnection(player, charAddedConn)
 end
 
 function BrainrotDiscoveryService:Init()
@@ -173,6 +207,11 @@ function BrainrotDiscoveryService:Start()
 
 	Players.PlayerAdded:Connect(function(player)
 		task.spawn(onPlayerAdded, player)
+	end)
+
+	-- D5 : cleanup des connexions tracées au PlayerRemoving (anti-leak).
+	Players.PlayerRemoving:Connect(function(player)
+		disconnectPlayerHooks(player.UserId)
 	end)
 
 	for _, player in ipairs(Players:GetPlayers()) do

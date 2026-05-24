@@ -340,11 +340,30 @@ local function hookPlayer(player)
 	-- puis on flush. On schedule plusieurs flush espacés pour rattraper les
 	-- changements asynchrones (restoration d'inventaire, recompute exclusifs).
 	player:WaitForChild("Cash", 30)
+
+	-- POLISH P1 : flush rapide pour que le nouveau joueur figure dans le top
+	-- en moins de ~2-3s au lieu de ~8s. Sans ça, le joueur voit la SurfaceGui
+	-- vide ou obsolète le temps que le premier scheduleWrite fire.
+	task.delay(2, function()
+		if player.Parent then scheduleWrite(player) end
+	end)
 	task.delay(8, function()
 		if player.Parent then scheduleWrite(player) end
 	end)
 	task.delay(20, function()
 		if player.Parent then scheduleWrite(player) end
+	end)
+
+	-- POLISH P1 : refresh immédiat du leaderboard pour ce joueur. Sans ça, il
+	-- devait attendre jusqu'à 60s (REFRESH_INTERVAL) avant de voir le top à
+	-- jour. On débounce de 1.5s avant le refresh pour laisser le temps au flush
+	-- ci-dessus de propager son score dans l'OrderedDataStore.
+	task.delay(3.5, function()
+		if not player.Parent then return end
+		local ok, err = pcall(refreshLeaderboard)
+		if not ok then
+			warn("[CashLeaderboard] Refresh on join échec : " .. tostring(err))
+		end
 	end)
 end
 
@@ -373,13 +392,27 @@ function CashLeaderboardService:Init()
 end
 
 function CashLeaderboardService:Start()
+	-- D8 : guard d'idempotence. hookPlayer yield sur WaitForChild("Cash", 30) ;
+	-- sans cette protection, un même joueur peut déclencher deux scheduleWrite
+	-- en parallèle qui se chevauchent et causent des SetAsync redondants
+	-- (gaspillage de quotas DataStore).
+	local hookedPlayers = {}
+	local function hookPlayerOnce(p)
+		if hookedPlayers[p.UserId] then return end
+		hookedPlayers[p.UserId] = true
+		hookPlayer(p)
+	end
+
 	Players.PlayerAdded:Connect(function(player)
-		task.spawn(hookPlayer, player)
+		task.spawn(hookPlayerOnce, player)
 	end)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	Players.PlayerRemoving:Connect(function(player)
+		hookedPlayers[player.UserId] = nil
+		onPlayerRemoving(player)
+	end)
 
 	for _, p in ipairs(Players:GetPlayers()) do
-		task.spawn(hookPlayer, p)
+		task.spawn(hookPlayerOnce, p)
 	end
 
 	-- Refresh immédiat puis loop périodique sur tous les serveurs.

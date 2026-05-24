@@ -34,22 +34,11 @@ local function formatNumber(num)
 	end
 end
 
--- Anim pop-in réutilisée pour les frames ouvertes via TouchPart (LikeFrame du
--- FreeGift). MenuAnimationController gère déjà le même effet via le UIScale
--- "_MenuAnimScale", on le redéclenche manuellement ici pour garantir le pop
--- à chaque ouverture.
-local POP_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-local POP_FROM = 0.6
-local function playFramePopIn(frame)
-	local scale = frame:FindFirstChild("_MenuAnimScale")
-	if not scale then
-		scale = Instance.new("UIScale")
-		scale.Name = "_MenuAnimScale"
-		scale.Parent = frame
-	end
-	scale.Scale = POP_FROM
-	TweenService:Create(scale, POP_TWEEN, { Scale = 1 }):Play()
-end
+-- LikeFrame & RunFrame & SellFrame : MenuAnimationController gère déjà
+-- l'animation pop-in via son PropertyChangedSignal("Visible"). On ne déclenche
+-- plus playFramePopIn manuellement ici : faire `Visible = true` suffit.
+-- (Avant : double tween en parallèle qui se Cancel mutuellement et donnait
+-- l'impression que l'anim ne jouait pas.)
 
 function UIController:Start()
 	local player = Players.LocalPlayer
@@ -227,7 +216,8 @@ function UIController:Start()
 			isInGroupZone = true
 			closeAllExcept(likeFrame)
 			likeFrame.Visible = true
-			playFramePopIn(likeFrame)
+			-- Pas besoin d'appeler playFramePopIn : MenuAnimationController
+			-- déclenche l'anim automatiquement via PropertyChangedSignal("Visible").
 		end
 	end)
 

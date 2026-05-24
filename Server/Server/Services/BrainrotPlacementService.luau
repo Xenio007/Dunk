@@ -135,6 +135,22 @@ local pendingUpgrades = {}
 local pendingMaxUpgrades = {}
 local PENDING_UPGRADE_TIMEOUT = 180
 
+-- D3 : rate limit anti-spam sur les remotes d'upgrade. Sans ça un exploiteur
+-- peut spammer BuyUpgrade/BuyMaxUpgrade FireServer à 60Hz pour saturer le
+-- serveur (walk descendants du plot à chaque appel + cascade de
+-- PromptProductPurchase qui pollue les pendings et race avec le steal).
+local lastUpgradeRequestAt = {} -- [userId] = os.clock()
+local UPGRADE_REQUEST_COOLDOWN = 0.4
+
+local function rateLimitUpgrade(player)
+	if typeof(player) ~= "Instance" or not player:IsA("Player") then return false end
+	local now = os.clock()
+	local last = lastUpgradeRequestAt[player.UserId] or 0
+	if now - last < UPGRADE_REQUEST_COOLDOWN then return false end
+	lastUpgradeRequestAt[player.UserId] = now
+	return true
+end
+
 -- buttonPart -> os.clock() of last successful claim. Prevents spam claims.
 local lastTouchAt = {}
 
@@ -594,35 +610,50 @@ end
 -- placés sur le plot) * (pourcentage de l'exclusif / 100). Appelé chaque fois
 -- que la composition du plot change (placement, retrait, upgrade) ou que le
 -- CashMulti du joueur évolue.
+-- D7 : version optimisée. L'ancien code parcourait `plot:GetDescendants()` ce
+-- qui peut atteindre 2000+ items quand le plot est plein de brainrots
+-- (chaque brainrot a ~80 BaseParts internes). À chaque place/upgrade/claim,
+-- on faisait un walk complet -> stutter visible avec 50 joueurs en parallèle.
+-- On itere maintenant uniquement les Folders "Slots" qui contiennent <= 21 parts.
 local function recomputePlotExclusives(player)
 	local plot = getPlayerPlot(player)
 	if not plot then return end
 
 	local cashMulti = getCashMulti(player)
 
-	-- 1) Somme des CPS des brainrots NON exclusifs.
 	local baseTotal = 0
 	local exclusiveSlots = {}
-	for _, desc in ipairs(plot:GetDescendants()) do
-		if desc:IsA("BasePart")
-			and desc.Parent
-			and desc.Parent.Name == "Slots"
-			and desc:GetAttribute(SLOT_OCCUPIED)
-		then
-			local fullName = desc:GetAttribute(SLOT_BRAINROT)
-			if type(fullName) == "string" and fullName ~= "" then
-				local info = BrainrotInfo.GetInfo(fullName)
-				if info then
-					if info.ExclusivePercent then
-						table.insert(exclusiveSlots, {
-							slot = desc,
-							info = info,
-							fullName = fullName,
-						})
-					else
-						local level = tonumber(desc:GetAttribute(SLOT_LEVEL)) or 1
-						local cps = BrainrotUpgrade.GetCps(info.CashPerSecond, level) * cashMulti
-						baseTotal = baseTotal + cps
+
+	-- Collecte les Folders "Slots" du plot (statiques + dynamiques par Floor).
+	local slotsContainers = {}
+	local floorsFolder = plot:FindFirstChild("Floors")
+	if floorsFolder then
+		for _, floorModel in ipairs(floorsFolder:GetChildren()) do
+			local slotsFolder = floorModel:FindFirstChild("Slots")
+			if slotsFolder then table.insert(slotsContainers, slotsFolder) end
+		end
+	end
+	local rootSlots = plot:FindFirstChild("Slots")
+	if rootSlots then table.insert(slotsContainers, rootSlots) end
+
+	for _, container in ipairs(slotsContainers) do
+		for _, desc in ipairs(container:GetChildren()) do
+			if desc:IsA("BasePart") and desc:GetAttribute(SLOT_OCCUPIED) then
+				local fullName = desc:GetAttribute(SLOT_BRAINROT)
+				if type(fullName) == "string" and fullName ~= "" then
+					local info = BrainrotInfo.GetInfo(fullName)
+					if info then
+						if info.ExclusivePercent then
+							table.insert(exclusiveSlots, {
+								slot = desc,
+								info = info,
+								fullName = fullName,
+							})
+						else
+							local level = tonumber(desc:GetAttribute(SLOT_LEVEL)) or 1
+							local cps = BrainrotUpgrade.GetCps(info.CashPerSecond, level) * cashMulti
+							baseTotal = baseTotal + cps
+						end
 					end
 				end
 			end
@@ -1061,6 +1092,13 @@ end
 local function initButton(buttonPart)
 	if not buttonPart:IsA("BasePart") then return end
 
+	-- D4 : Garde anti-double-init. Sans ça, chaque join (qui appelle
+	-- attachPlotWatcher → walkAndInit → initButton) ajoute UN NOUVEAU
+	-- Touched:Connect cumulatif → ClaimButton se déclenche N fois par contact,
+	-- multipliant le cash per touch -> exploit de cash gratuit + spam serveur.
+	if buttonPart:GetAttribute("_BrainrotPlacementInited") then return end
+	buttonPart:SetAttribute("_BrainrotPlacementInited", true)
+
 	if buttonPart:GetAttribute(BTN_CPS) == nil      then buttonPart:SetAttribute(BTN_CPS, 0) end
 	if buttonPart:GetAttribute(BTN_ACCUM_START) == nil then buttonPart:SetAttribute(BTN_ACCUM_START, 0) end
 	if buttonPart:GetAttribute(BTN_ACCUM_CAP) == nil then buttonPart:SetAttribute(BTN_ACCUM_CAP, ACCUM_CAP_SECONDS) end
@@ -1087,6 +1125,12 @@ end
 
 local function initSlot(slotPart)
 	if not slotPart:IsA("BasePart") then return end
+
+	-- D4 : Garde anti-double-init pour la cohérence avec initButton.
+	-- Le prompt Triggered:Connect est déjà protégé par `if not prompt`, mais
+	-- on bloque aussi le re-set des attributs / re-create du prompt.
+	if slotPart:GetAttribute("_BrainrotPlacementInited") then return end
+	slotPart:SetAttribute("_BrainrotPlacementInited", true)
 
 	if slotPart:GetAttribute(SLOT_OCCUPIED) == nil then slotPart:SetAttribute(SLOT_OCCUPIED, false) end
 	if slotPart:GetAttribute(SLOT_BRAINROT) == nil then slotPart:SetAttribute(SLOT_BRAINROT, "") end
@@ -1968,7 +2012,10 @@ function BrainrotPlacementService:HandleUpgradePurchase(player, productId)
 
 	local pending = pendingUpgrades[player.UserId]
 	if not pending or pending.expiresAt < os.clock() then
-		warn(string.format("[Upgrade] Achat %d pour %s sans pending valide", productId, player.Name))
+		warn(string.format(
+			"[Upgrade] PERTE POTENTIELLE — Achat %d (Robux, +3 niveaux) reçu pour %s mais pas de pending valide. Le joueur a payé sans recevoir l'upgrade. Vérifier les logs autour de cette heure pour un refund manuel.",
+			productId, player.Name
+		))
 		pendingUpgrades[player.UserId] = nil
 		return true -- on accepte quand même pour éviter les retries Roblox
 	end
@@ -2052,7 +2099,10 @@ function BrainrotPlacementService:HandleMaxUpgradePurchase(player, productId)
 
 	local pending = pendingMaxUpgrades[player.UserId]
 	if not pending or pending.expiresAt < os.clock() then
-		warn(string.format("[MaxUpgrade] Achat %d pour %s sans pending valide", productId, player.Name))
+		warn(string.format(
+			"[MaxUpgrade] PERTE POTENTIELLE — Achat %d (Robux, MAX) reçu pour %s mais pas de pending valide. Le joueur a payé sans recevoir l'upgrade MAX. Vérifier les logs autour de cette heure pour un refund manuel.",
+			productId, player.Name
+		))
 		pendingMaxUpgrades[player.UserId] = nil
 		return true
 	end
@@ -2092,10 +2142,16 @@ function BrainrotPlacementService:HandleMaxUpgradePurchase(player, productId)
 end
 
 local function onBuyUpgrade(player, slotPart)
+	-- D3 : rate limit + validation stricte du type avant de descendre.
+	if not rateLimitUpgrade(player) then return end
+	if typeof(slotPart) ~= "Instance" or not slotPart:IsA("BasePart") then return end
 	BrainrotPlacementService:_performUpgrade(player, slotPart)
 end
 
 local function onBuyMaxUpgrade(player, slotPart)
+	-- D3 : rate limit + validation stricte du type avant de descendre.
+	if not rateLimitUpgrade(player) then return end
+	if typeof(slotPart) ~= "Instance" or not slotPart:IsA("BasePart") then return end
 	BrainrotPlacementService:_performMaxUpgrade(player, slotPart)
 end
 
@@ -2140,8 +2196,23 @@ end
 function BrainrotPlacementService:Start()
 	DataService = Loader.GetService("DataService")
 
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	-- D8 : guard d'idempotence sur le bind par joueur. waitForPlotAndInit
+	-- contient un WaitForChild qui yield ; sans cette protection, un même
+	-- joueur peut être bindé deux fois (race PlayerAdded vs GetPlayers Studio)
+	-- → deux passes de placeBrainrot en parallèle sur le même slot → brainrots
+	-- dupliqués qui rapportent du cash en double.
+	local hookedPlayers = {}
+	local function hookPlayerOnce(p)
+		if hookedPlayers[p.UserId] then return end
+		hookedPlayers[p.UserId] = true
+		onPlayerAdded(p)
+	end
+
+	Players.PlayerAdded:Connect(hookPlayerOnce)
+	Players.PlayerRemoving:Connect(function(p)
+		hookedPlayers[p.UserId] = nil
+		onPlayerRemoving(p)
+	end)
 
 	if buyUpgradeEvent then
 		buyUpgradeEvent.OnServerEvent:Connect(onBuyUpgrade)
@@ -2155,11 +2226,12 @@ function BrainrotPlacementService:Start()
 		pendingSteals[plr.UserId] = nil
 		pendingUpgrades[plr.UserId] = nil
 		pendingMaxUpgrades[plr.UserId] = nil
+		lastUpgradeRequestAt[plr.UserId] = nil
 	end)
 
 	-- Studio / Replay: handle already-connected players.
 	for _, player in ipairs(Players:GetPlayers()) do
-		onPlayerAdded(player)
+		hookPlayerOnce(player)
 	end
 
 	print("[BrainrotPlacementService] Prêt")

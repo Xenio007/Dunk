@@ -179,6 +179,17 @@ local WAVE_TOUCH_RADIUS   = 6     -- distance horizontale en studs pour qu'un br
 -- [userId] = true tant qu'une séquence est en cours pour ce joueur.
 local inSession = {}
 
+-- [userId] = clone instance du Dunk Clone qui court vers KickReady. Par-joueur
+-- pour éviter les écrasements quand plusieurs joueurs lancent en parallèle
+-- (l'ancienne version utilisait _G.DunkCurrentRunningClone qui était global).
+local activeRunningClones = {}
+
+-- [userId] = os.clock() de la dernière requête DunkRequestEvent. Anti-spam
+-- côté serveur : limite la cadence de tirs même si un exploiteur tente de
+-- bypass le mini-jeu côté client en envoyant le remote en boucle.
+local lastDunkAt = {}
+local DUNK_MIN_INTERVAL = 5 -- secondes minimum entre 2 tirs
+
 -- ===== Helpers =====
 
 local function getKickReady()
@@ -1352,9 +1363,15 @@ local function runSequence(player, grade, fill)
 	else
 		local waveOffset = 30
 		local waveDirFromTarget = Vector3.new(0, 0, 0)
-		if kickReadyPart then
-			local dx = kickReadyPart.Position.X - impactPos.X
-			local dz = kickReadyPart.Position.Z - impactPos.Z
+		-- Fallback : si la W-part n'existe pas pour cette rareté, on calcule la
+		-- direction depuis la KickReady récupérée à la volée. Anciennement le code
+		-- référençait `kickReadyPart` qui n'existait PAS dans ce scope, ce qui
+		-- levait une erreur runtime et laissait le joueur figé en mode brainrot
+		-- (WalkSpeed=0, transformation jamais retirée).
+		local kickReadyFallback = getKickReady()
+		if kickReadyFallback then
+			local dx = kickReadyFallback.Position.X - impactPos.X
+			local dz = kickReadyFallback.Position.Z - impactPos.Z
 			local mag = math.sqrt(dx*dx + dz*dz)
 			if mag > 0.001 then
 				waveDirFromTarget = Vector3.new(-dx / mag, 0, -dz / mag)
@@ -1427,7 +1444,7 @@ local function runSequence(player, grade, fill)
 					local newClone = DunkCloneService:SpawnAndRun(player, cloneTouchdownPos, kickReadyForRun, getCurrentSpeed)
 					if newClone then
 						DunkCloneService:BindContinuousSpeed(newClone, getCurrentSpeed)
-						_G.DunkCurrentRunningClone = newClone
+						activeRunningClones[userId] = newClone
 					end
 				end)
 			end
@@ -1549,8 +1566,8 @@ local function runSequence(player, grade, fill)
 		})
 
 		-- Cleanup immédiat du clone : la séquence est terminée (mort).
-		local toClean = _G.DunkCurrentRunningClone or cloneInstance
-		_G.DunkCurrentRunningClone = nil
+		local toClean = activeRunningClones[userId] or cloneInstance
+		activeRunningClones[userId] = nil
 		if toClean and DunkCloneService then
 			DunkCloneService:Cleanup(toClean)
 		end
@@ -1608,8 +1625,8 @@ local function runSequence(player, grade, fill)
 		})
 
 		-- Cleanup immédiat du clone : le joueur a réussi son dunk.
-		local toClean = _G.DunkCurrentRunningClone or cloneInstance
-		_G.DunkCurrentRunningClone = nil
+		local toClean = activeRunningClones[userId] or cloneInstance
+		activeRunningClones[userId] = nil
 		if toClean and DunkCloneService then
 			DunkCloneService:Cleanup(toClean)
 		end
@@ -1666,9 +1683,9 @@ local function runSequence(player, grade, fill)
 	end
 
 	-- Sécurité : si le clone n'a pas été cleanup avant, on le fait ici.
-	local runningClone = _G.DunkCurrentRunningClone
+	local runningClone = activeRunningClones[userId]
 	if runningClone and DunkCloneService then
-		_G.DunkCurrentRunningClone = nil
+		activeRunningClones[userId] = nil
 		DunkCloneService:Cleanup(runningClone)
 	end
 	if cloneInstance and cloneInstance.Parent and DunkCloneService then
@@ -1685,8 +1702,15 @@ end
 -- Configure les collision groups partagés :
 --   DunkBrainrot  vs Default        -> on collide (sol, murs, etc.)
 --   DunkBrainrot  vs DunkBlockPart  -> PAS de collision (passe à travers)
--- Les autres joueurs utilisent Default et donc entrent en collision avec les
--- BlockPart normalement.
+--   DunkBrainrot  vs DunkBrainrot   -> PAS de collision (les joueurs en
+--                                     brainrot se traversent entre eux,
+--                                     sinon on a des bouchons et collisions
+--                                     parasites à plusieurs en parallèle)
+--   DunkBrainrot  vs DunkCloneRunner-> PAS de collision (un joueur en
+--                                     brainrot doit aussi traverser les
+--                                     clones décoratifs des autres)
+-- Les autres joueurs (qui ne sont PAS en brainrot) utilisent Default et
+-- entrent donc en collision avec les BlockPart normalement.
 local function setupCollisionGroups()
 	pcall(function()
 		PhysicsService:RegisterCollisionGroup(BRAINROT_COLLISION_GROUP)
@@ -1694,8 +1718,24 @@ local function setupCollisionGroups()
 	pcall(function()
 		PhysicsService:RegisterCollisionGroup(BLOCKPART_COLLISION_GROUP)
 	end)
+	-- Pre-register le DunkCloneRunner ICI pour pouvoir poser les règles
+	-- croisées BRAINROT ↔ CLONE_RUNNER dès l'init du serveur, sans dépendre
+	-- de l'ordre d'exécution lazy de DunkCloneService.
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup("DunkCloneRunner")
+	end)
 	pcall(function()
 		PhysicsService:CollisionGroupSetCollidable(BRAINROT_COLLISION_GROUP, BLOCKPART_COLLISION_GROUP, false)
+	end)
+	-- Brainrot vs Brainrot : les joueurs transformés se traversent.
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(BRAINROT_COLLISION_GROUP, BRAINROT_COLLISION_GROUP, false)
+	end)
+	-- Brainrot vs CloneRunner : un brainrot traverse les clones (et
+	-- inversement). Cela couvre le cas joueur A en brainrot qui croise le
+	-- clone décoratif de joueur B en pleine course.
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(BRAINROT_COLLISION_GROUP, "DunkCloneRunner", false)
 	end)
 end
 
@@ -1728,14 +1768,38 @@ function DunkLuckyBlockService:Start()
 		if typeof(grade) ~= "string" or not GRADE_WEIGHT[grade] then
 			grade = "MID"
 		end
-		if typeof(fill) ~= "number" then
+		-- NaN check (fill ~= fill est true UNIQUEMENT pour NaN) puis clamp [0,1].
+		if typeof(fill) ~= "number" or fill ~= fill then
 			fill = 0.5
 		end
+		fill = math.clamp(fill, 0, 1)
+
+		-- Anti-spam serveur : limite la cadence à 1 tir / DUNK_MIN_INTERVAL
+		-- secondes même si un exploiteur tente de bypass le mini-jeu de timing
+		-- côté client. inSession bloque déjà les concurrents pendant la séquence
+		-- en cours, mais ce cooldown empêche de relancer immédiatement après la fin.
+		local userId = player.UserId
+		local nowClock = os.clock()
+		local last = lastDunkAt[userId] or 0
+		if nowClock - last < DUNK_MIN_INTERVAL then
+			return
+		end
+		if inSession[userId] then return end
+		lastDunkAt[userId] = nowClock
+
 		task.spawn(runSequence, player, grade, fill)
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		inSession[player.UserId] = nil
+		local userId = player.UserId
+		inSession[userId] = nil
+		lastDunkAt[userId] = nil
+		-- Cleanup d'un éventuel running clone laissé par la session courante.
+		local clone = activeRunningClones[userId]
+		activeRunningClones[userId] = nil
+		if clone and DunkCloneService then
+			pcall(function() DunkCloneService:Cleanup(clone) end)
+		end
 		PlayerBrainrotTransform.Remove(player)
 	end)
 

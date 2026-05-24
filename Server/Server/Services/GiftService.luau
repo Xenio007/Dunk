@@ -57,6 +57,12 @@ local giftCancelEvent    -- server -> receiver client (timeout / annulation)
 local pendingByReceiver = {}
 local nextOfferId = 0
 
+-- D2 : rate limit anti-spam côté serveur. Sans ça un exploiteur peut spammer
+-- GiftResponseEvent:FireServer à 60 Hz et saturer le CPU serveur (chaque appel
+-- déclenche findEquippedBrainrotTool + findTemplateByFullName en O(N)).
+local lastResponseAt = {} -- [userId] = os.clock()
+local RESPONSE_COOLDOWN = 0.25 -- 4 réponses/sec max par joueur
+
 -- ===== UTILS =====
 
 local function findEquippedBrainrotTool(player)
@@ -85,6 +91,9 @@ end
 -- émetteur ou receveur. Utilisé lors du PlayerRemoving.
 local function cancelOffersInvolving(player)
 	local uid = player.UserId
+
+	-- Cleanup le rate-limit du joueur qui part.
+	lastResponseAt[uid] = nil
 
 	-- En tant que receveur.
 	if pendingByReceiver[uid] then
@@ -199,11 +208,23 @@ end
 -- ===== RESPONSE HANDLER =====
 
 local function onGiftResponse(receiver, id, accept)
-	if typeof(id) ~= "number" then return end
+	-- D2 : Validation stricte des types. Un exploiteur peut envoyer n'importe
+	-- quel type via FireServer. NaN check pour les nombres piégés (id ~= id).
+	if typeof(id) ~= "number" or id ~= id then return end
+	-- Strict booléen : tout autre type (table, nil, string, ...) => no-op silencieux.
+	if typeof(accept) ~= "boolean" then return end
 
-	local pending = pendingByReceiver[receiver.UserId]
+	-- D2 : Rate limit anti-spam serveur (4/sec max par joueur).
+	local userId = receiver.UserId
+	local now = os.clock()
+	if (lastResponseAt[userId] or 0) + RESPONSE_COOLDOWN > now then
+		return
+	end
+	lastResponseAt[userId] = now
+
+	local pending = pendingByReceiver[userId]
 	if not pending or pending.id ~= id then return end
-	pendingByReceiver[receiver.UserId] = nil
+	pendingByReceiver[userId] = nil
 
 	if not accept then return end
 

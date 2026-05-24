@@ -781,13 +781,27 @@ function DataService:Init()
 	dataStore = DataStoreService:GetDataStore(DATASTORE_NAME)
 end
 
+-- D8 : guard d'idempotence pour éviter qu'un même joueur soit chargé deux fois
+-- (race entre PlayerAdded:Connect et la boucle GetPlayers du Studio replay).
+-- Charger 2x un profil cause des appels DataStore concurrents et corrompt le
+-- session-locking interne.
+local hookedPlayers = {}
+local function hookPlayerOnce(player)
+	if hookedPlayers[player.UserId] then return end
+	hookedPlayers[player.UserId] = true
+	onPlayerAdded(player)
+end
+
 function DataService:Start()
-	Players.PlayerAdded:Connect(onPlayerAdded)
-	Players.PlayerRemoving:Connect(onPlayerRemoving)
+	Players.PlayerAdded:Connect(hookPlayerOnce)
+	Players.PlayerRemoving:Connect(function(player)
+		hookedPlayers[player.UserId] = nil
+		onPlayerRemoving(player)
+	end)
 
 	-- Rattrapage Studio.
 	for _, p in ipairs(Players:GetPlayers()) do
-		task.spawn(onPlayerAdded, p)
+		task.spawn(hookPlayerOnce, p)
 	end
 
 	-- Autosave : filet de sécurité. La logique principale est event-driven

@@ -13,6 +13,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GroupService = game:GetService("GroupService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
@@ -22,7 +23,7 @@ local GroupRewardService = Loader.CreateService({
 })
 
 -- ⚠️ À REMPLACER par l'ID de ton groupe Roblox.
-local GROUP_ID = 0
+local GROUP_ID = 652951457
 
 local REWARD_BRAINROT_NAME = "Gangster Footera"
 
@@ -44,10 +45,34 @@ local function isPlayerInGroup(player)
 		warn("[GroupRewardService] GROUP_ID n'est pas configuré.")
 		return true
 	end
-	local ok, result = pcall(function()
-		return player:IsInGroup(GROUP_ID)
+
+	-- IMPORTANT : on utilise GroupService:GetGroupsAsync(userId) au lieu de
+	-- Player:IsInGroup ou Player:IsInGroupAsync.
+	-- Raison : ces deux dernières mettent en cache le résultat à la première
+	-- vérification côté serveur. Si un joueur n'était PAS dans le groupe au
+	-- premier appel et qu'il rejoint en pleine session via le popup natif
+	-- PromptJoinAsync, l'API continuera de retourner false jusqu'à ce qu'il
+	-- quitte et revienne sur le serveur.
+	-- GetGroupsAsync, lui, fait un appel HTTP frais à chaque fois → il voit
+	-- immédiatement les changements d'appartenance.
+	local ok, groups = pcall(function()
+		return GroupService:GetGroupsAsync(player.UserId)
 	end)
-	return ok and result == true
+	if not ok or type(groups) ~= "table" then
+		warn("[GroupRewardService] GetGroupsAsync échec pour " .. player.Name ..
+			" : " .. tostring(groups))
+		-- En cas d'échec API (rare), on REFUSE par défaut pour ne pas distribuer
+		-- la récompense à quelqu'un qui n'est pas dans le groupe. Le client peut
+		-- recliquer plus tard.
+		return false
+	end
+
+	for _, info in ipairs(groups) do
+		if tonumber(info.Id) == GROUP_ID then
+			return true
+		end
+	end
+	return false
 end
 
 local function onClaimRequest(player)
