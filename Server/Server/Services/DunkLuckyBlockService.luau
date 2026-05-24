@@ -854,16 +854,27 @@ local function runSequence(player, grade, fill)
 	grade = grade or "MID"
 
 	local cleanupTasks = {}
+	-- Flag local PROPRE à cette session. Évite qu'un timer de fin de session
+	-- précédente fire le cleanup d'une session ultérieure (cas des lancers
+	-- successifs : Run 1 finit normalement à t=15s, Run 2 démarre à t=20s,
+	-- timer de Run 1 fire à t=90s avec inSession=true à cause de Run 2, et
+	-- déclenche PlayerBrainrotTransform.Remove sur la session courante).
+	local cleanupDone = false
 	local function cleanup()
+		if cleanupDone then return end
+		cleanupDone = true
 		inSession[userId] = nil
 		for _, fn in ipairs(cleanupTasks) do
 			pcall(fn)
 		end
 	end
 
-	-- Filet de sécurité : force le cleanup après MAX_SESSION_TIME.
+	-- Filet de sécurité : force le cleanup après MAX_SESSION_TIME, mais
+	-- UNIQUEMENT si cette session-là n'a pas déjà été cleanupée. Le flag
+	-- cleanupDone est capturé dans la closure et reste privé à cette session,
+	-- donc le timer ne touchera jamais une session ultérieure.
 	task.delay(MAX_SESSION_TIME, function()
-		if inSession[userId] then
+		if not cleanupDone then
 			cleanup()
 		end
 	end)

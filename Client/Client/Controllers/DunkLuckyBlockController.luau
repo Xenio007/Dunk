@@ -1407,6 +1407,21 @@ function DunkLuckyBlockController:Start()
 
 	dunkSequenceEvent.OnClientEvent:Connect(function(phase, data)
 		if phase == "Start" then
+			-- Reset propre des flags globaux ET de l'état local au début de
+			-- chaque nouvelle séquence. Sans ça, une session précédente mal
+			-- terminée peut laisser _G.DunkBrainrotFrozen=true ou
+			-- attachedBrainrotVisual non-nil, ce qui bloque les phases suivantes
+			-- (caméra figée sur character, contrôles morts au WaveChase).
+			_G.DunkBrainrotFrozen = false
+			_G.DunkBlockCamera = false
+			_G.DunkWaveCamera = false
+			if frozenStateConn then
+				frozenStateConn:Disconnect()
+				frozenStateConn = nil
+			end
+			attachedBrainrotVisual = nil
+			currentBrainrotWalkSpeed = nil
+
 			_G.DunkSequenceInProgress = true
 			if dunkButton then dunkButton.Visible = false end
 
@@ -1925,11 +1940,25 @@ function DunkLuckyBlockController:Start()
 
 		elseif phase == "WaveChase" then
 			-- Sécurité : si pour une raison quelconque BrainrotPicked n'a pas été
-			-- appliqué (race condition réseau, frame drop), on récupère le contrôle
-			-- ici. Sinon le joueur reste sur son character d'origine après la
-			-- wave et ne peut pas courir.
+			-- appliqué (race condition réseau, frame drop), ou si attachedBrainrotVisual
+			-- pointe vers un visuel détruit (lancers successifs : la session précédente
+			-- a laissé la référence en place mais le serveur a déjà supprimé le visuel),
+			-- on forçe takeControl ici pour que le joueur reprenne effectivement
+			-- le contrôle. Sans ça, releaseControl serait joué sur le mauvais context
+			-- et la caméra resterait sur le character d'origine figé.
 			local brainrotNameForControl = data and data.BrainrotName
-			if brainrotNameForControl and not attachedBrainrotVisual then
+			local needsTakeControl = false
+			if not attachedBrainrotVisual then
+				needsTakeControl = true
+			elseif typeof(attachedBrainrotVisual) == "Instance" and not attachedBrainrotVisual.Parent then
+				needsTakeControl = true
+			elseif not frozenStateConn then
+				-- La connexion de freeze a sauté (cleanup sauvage de la session
+				-- précédente l'a déco et personne ne l'a recréée). Sans elle, la
+				-- WalkSpeed peut rester à 0 et le joueur reste figé.
+				needsTakeControl = true
+			end
+			if brainrotNameForControl and needsTakeControl then
 				takeControl(brainrotNameForControl, data.WalkSpeed, data.JumpPower)
 			end
 
