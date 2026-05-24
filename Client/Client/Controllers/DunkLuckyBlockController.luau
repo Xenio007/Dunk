@@ -828,6 +828,17 @@ function DunkLuckyBlockController:Start()
 			frozenStateConn = nil
 		end
 
+		-- Réactive les contrôles natifs du PlayerModule. DunkGameController les
+		-- a desactives via controls:Disable() pendant l'animation de tir et
+		-- personne ne les rallume avant ici. Sans ce bloc, joystick mobile et
+		-- WASD restent figes apres la sequence (mort par wave OU dunk reussi).
+		pcall(function()
+			local PlayerScripts = player:WaitForChild("PlayerScripts")
+			local PlayerModule = require(PlayerScripts:WaitForChild("PlayerModule"))
+			local controls = PlayerModule:GetControls()
+			controls:Enable()
+		end)
+
 		-- Le visuel brainrot est détruit par le serveur (PlayerBrainrotTransform.Remove).
 		-- Le client efface juste sa référence locale.
 		attachedBrainrotVisual = nil
@@ -910,6 +921,17 @@ function DunkLuckyBlockController:Start()
 			targetJump = 55
 		end
 		currentBrainrotWalkSpeed = targetSpeed
+
+		-- Réactive les contrôles natifs du PlayerModule. CRITICAL : DunkGameController
+		-- les a desactives via controls:Disable() pendant l'animation de tir, et
+		-- personne ne les rallume. Sans ce bloc, le joystick mobile et WASD
+		-- restent figes apres la sequence Dunk meme si WalkSpeed > 0.
+		pcall(function()
+			local PlayerScripts = player:WaitForChild("PlayerScripts")
+			local PlayerModule = require(PlayerScripts:WaitForChild("PlayerModule"))
+			local controls = PlayerModule:GetControls()
+			controls:Enable()
+		end)
 
 		-- Force la WalkSpeed/JumpPower côté client. Même si le serveur les a
 		-- déjà réglées, le client a network ownership sur son Humanoid et son
