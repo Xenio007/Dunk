@@ -1570,6 +1570,82 @@ function BrainrotPlacementService:RefreshCpsForPlayer(player)
 	end
 end
 
+-- ===== AUTO-COLLECT GAMEPASS =====
+--
+-- Pour les joueurs qui possèdent le gamepass AutoCollect, on claim leurs
+-- boutons toutes les `AUTO_COLLECT_INTERVAL` secondes sans qu'ils aient à
+-- marcher dessus. Réutilise ClaimButton (en mode silent) pour garder une
+-- source de vérité unique : même calcul du cash gagné, même reset de
+-- l'accumulateur, même application du cap. La seule différence est qu'on
+-- ne joue PAS l'animation "press" du bouton (silent = true) pour ne pas
+-- spammer un effet visuel toutes les ticks.
+--
+-- Source de vérité du flag : Player:GetAttribute("HasAutoCollect").
+-- Posé par GamepassService :
+--   * au join après UserOwnsGamePassAsync
+--   * sur PromptGamePassPurchaseFinished (achat live)
+-- Plus rapide qu'un appel DataService:HasGamepass et évite la fenêtre
+-- de race entre :Start de DataService et :Start de BrainrotPlacementService.
+local AUTO_COLLECT_INTERVAL = 2
+local AUTO_COLLECT_ATTR = "HasAutoCollect"
+
+local function playerHasAutoCollect(player)
+	-- Fast path : attribute Player (set par GamepassService).
+	if player:GetAttribute(AUTO_COLLECT_ATTR) == true then
+		return true
+	end
+	-- Fallback : profil DataService. Couvre le cas où GamepassService n'a
+	-- pas encore eu le temps de poser l'attribute (joueur tout juste co).
+	if DataService and DataService.HasGamepass and DataService:HasGamepass(player, "AutoCollect") then
+		player:SetAttribute(AUTO_COLLECT_ATTR, true) -- self-heal pour les ticks suivants
+		return true
+	end
+	return false
+end
+
+local function autoCollectTickForPlayer(player)
+	if not playerHasAutoCollect(player) then return end
+	local plot = getPlayerPlot(player)
+	if not plot then return end
+	local floorsFolder = plot:FindFirstChild("Floors")
+	local containers = {}
+	if floorsFolder then
+		for _, floorModel in ipairs(floorsFolder:GetChildren()) do
+			local buttons = floorModel:FindFirstChild("Buttons")
+			if buttons then table.insert(containers, buttons) end
+		end
+	end
+	local rootButtons = plot:FindFirstChild("Buttons")
+	if rootButtons then table.insert(containers, rootButtons) end
+
+	for _, container in ipairs(containers) do
+		for _, btn in ipairs(container:GetChildren()) do
+			if btn:IsA("BasePart") then
+				local cps = btn:GetAttribute(BTN_CPS) or 0
+				if cps > 0 then
+					-- silent = true : pas d'animation "press" puisque le
+					-- joueur n'a pas physiquement marché sur le bouton.
+					BrainrotPlacementService:ClaimButton(player, btn, true)
+				end
+			end
+		end
+	end
+end
+
+local function startAutoCollectLoop()
+	task.spawn(function()
+		while true do
+			task.wait(AUTO_COLLECT_INTERVAL)
+			for _, player in ipairs(Players:GetPlayers()) do
+				-- Wrappe chaque joueur dans un pcall pour qu'une erreur sur
+				-- un joueur (ex : plot détruit pendant le walk) n'arrête
+				-- pas la boucle pour les autres.
+				pcall(autoCollectTickForPlayer, player)
+			end
+		end
+	end)
+end
+
 local function onPlayerPlotReady(player)
 	local plot = getPlayerPlot(player)
 	if not plot then return end
@@ -2233,6 +2309,11 @@ function BrainrotPlacementService:Start()
 	for _, player in ipairs(Players:GetPlayers()) do
 		hookPlayerOnce(player)
 	end
+
+	-- Démarre la boucle d'auto-claim pour les joueurs avec le gamepass
+	-- AutoCollect. Une seule task globale ; elle filtre les joueurs avec
+	-- le flag à chaque tick.
+	startAutoCollectLoop()
 
 	print("[BrainrotPlacementService] Prêt")
 end

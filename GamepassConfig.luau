@@ -28,6 +28,37 @@ GamepassConfig.PRODUCTS = {
 	SERVER_LUCK   = 3590166144,
 }
 
+-- Vrais Roblox GamePasses (par opposition aux Developer Products ci-dessus).
+-- Ils utilisent une API différente :
+--   * Achat client  : MarketplaceService:PromptGamePassPurchase
+--   * Ownership     : MarketplaceService:UserOwnsGamePassAsync
+--   * Live purchase : MarketplaceService.PromptGamePassPurchaseFinished
+-- Roblox les conserve naturellement sur le compte (pas besoin de DataStore),
+-- mais on garde quand même un flag `gp` dans le profil pour accès rapide
+-- via DataService:HasGamepass.
+GamepassConfig.GAMEPASSES = {
+	AUTO_COLLECT = 1822301236,
+}
+
+-- Reverse map : gamepassId -> nom de flag persistant. Les IDs à 0 sont
+-- ignorés pour éviter de matcher du bruit.
+GamepassConfig.FLAG_FOR_GAMEPASS = {}
+for key, flagName in pairs({
+	AUTO_COLLECT = "AutoCollect",
+}) do
+	local id = GamepassConfig.GAMEPASSES[key]
+	if id and id > 0 then
+		GamepassConfig.FLAG_FOR_GAMEPASS[id] = flagName
+	end
+end
+
+-- AutoCollect : le serveur claim automatiquement les boutons brainrot du joueur
+-- toutes les `AUTO_COLLECT_INTERVAL` secondes au lieu d'attendre qu'il marche
+-- physiquement dessus. Intervalle volontairement court pour que la sensation
+-- soit "continue" mais pas trop court pour limiter le nombre d'écritures de
+-- Cash.Value (chaque pass = 1 set par bouton occupé).
+GamepassConfig.AUTO_COLLECT_INTERVAL = 5
+
 -- Icônes affichées dans BottomRight quand le gamepass est actif. On réutilise
 -- les mêmes images que celles du shop (ShopFrame.Scrolling.Deals...Content.Icon)
 -- pour garantir la cohérence visuelle.
@@ -39,6 +70,7 @@ GamepassConfig.ICONS = {
 	VIP           = "rbxassetid://79304377550054",
 	MUTATION_LUCK = "rbxassetid://90240660519266",
 	SERVER_LUCK   = "rbxassetid://124859614241581", -- fallback ; remplacer si besoin
+	AUTO_COLLECT  = "rbxassetid://124859614241581", -- fallback ; à remplacer par l'icône dédiée
 }
 
 -- Multiplicateurs appliqués par les gamepasses.
@@ -98,7 +130,7 @@ end
 -- Liste des flags persistants (nom court stocké dans le profil).
 GamepassConfig.FLAGS = {
 	"StarterPack", "CashX2", "PowerX2", "Speed12X", "BrainrotLuck",
-	"VIP", "MutationLuck",
+	"VIP", "MutationLuck", "AutoCollect",
 }
 
 return GamepassConfig

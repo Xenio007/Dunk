@@ -1,6 +1,6 @@
 --[[
 	RandomBrainrotController (Controller module)
-	Gère StarterGui.MainGui.RandomBrainrot :
+	Gère StarterGui.MainGui.UIRight.RandomBrainrot :
 
 	1. Visibilité géo : invisible dans les pays bloqués pour le casino (random
 	   loot box payant). Exception : le UserId du créateur peut toujours le voir
@@ -13,10 +13,7 @@
 
 	4. Click -> PromptProductPurchase (productId 3591856301).
 
-	Migration 1:1 de StarterPlayerScripts.RandomBrainrotControllerLocalScript.
-	Note : le Name est unique et différent de StarterPlayer.StarterPlayerScripts
-	.Client.Controllers.RandomBrainrotController... non, ce nom-là n'existe pas
-	encore : le LocalScript original n'avait pas de Controller homonyme.
+	Note : le bouton a été déplacé sous MainGui.UIRight (au lieu de MainGui).
 --]]
 
 local Players              = game:GetService("Players")
@@ -56,7 +53,14 @@ function RandomBrainrotController:Start()
 		return
 	end
 
-	local randomBrainrot = mainGui:WaitForChild("RandomBrainrot", 15)
+	-- Le bouton vit maintenant sous MainGui.UIRight (regroupé avec AutoCollect).
+	local uiRight = mainGui:WaitForChild("UIRight", 15)
+	if not uiRight then
+		warn("[RandomBrainrotController] UIRight introuvable")
+		return
+	end
+
+	local randomBrainrot = uiRight:WaitForChild("RandomBrainrot", 15)
 	if not randomBrainrot or not randomBrainrot:IsA("ImageButton") then
 		warn("[RandomBrainrotController] RandomBrainrot button introuvable")
 		return

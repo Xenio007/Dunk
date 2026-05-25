@@ -7,7 +7,28 @@
 
 -- KONSTANTWARNING: Variable analysis failed. Output will have some incorrect variable assignments
 local module_upvr_2 = {}
-local module_upvr = require(game.ReplicatedStorage:WaitForChild("VariantsModule"))
+-- Lookup défensif : on n'utilise PAS WaitForChild() sans timeout, pour
+-- éviter un infinite-yield si VariantsModule est absent (cf. incident
+-- camera-stuck-on-Wave). Si le module manque ou est cassé, on tombe sur
+-- un fallback vide : les variants ne seront pas générés mais la base
+-- de brainrots reste consultable, et aucun thread ne bloque.
+local module_upvr
+do
+	local inst = game.ReplicatedStorage:FindFirstChild("VariantsModule")
+	if inst then
+		local ok, mod = pcall(require, inst)
+		if ok and type(mod) == "table" then
+			module_upvr = mod
+		else
+			warn("[BrainrotsModule] VariantsModule présent mais require a échoué : " .. tostring(mod))
+		end
+	else
+		warn("[BrainrotsModule] VariantsModule introuvable dans ReplicatedStorage : variants non générés")
+	end
+	if type(module_upvr) ~= "table" or type(module_upvr.VARIANTS) ~= "table" then
+		module_upvr = { VARIANTS = {} }
+	end
+end
 local function formatCommas_upvr(arg1) -- Line 4, Named "formatCommas"
 	local any_match_result1, any_match_result2 = arg1:match("^(.-)(%d+)$")
 	if not any_match_result2 then
@@ -1107,7 +1128,7 @@ for _, v_2 in ipairs(module_upvr.VARIANTS) do
 			["Odin Din Din Dun"] = "rbxassetid://96060263010297";
 			["Orangutini Ananassini"] = "rbxassetid://73544836687411";
 			["Orcalero Orcala"] = "rbxassetid://105144586250832";
-			["Pakrahmatmama" = "rbxassetid://91763780815282";
+			["Pakrahmatmama"] = "rbxassetid://91763780815282";
 			["Pakrahmatmatina"] = "rbxassetid://96967436611342";
 			["Pandaccini Bananini"] = "rbxassetid://122592150806534";
 			["Pipi Kiwi"] = "rbxassetid://139141374985134";

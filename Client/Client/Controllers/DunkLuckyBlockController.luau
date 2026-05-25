@@ -24,6 +24,7 @@ local Workspace = game:GetService("Workspace")
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared:WaitForChild("RemotesAPI"))
 local VFXPlayer = require(ReplicatedStorage.Shared:WaitForChild("VFXPlayer"))
+local BrainrotInfo = require(ReplicatedStorage.Shared:WaitForChild("BrainrotInfo"))
 
 local DunkLuckyBlockController = Loader.CreateController({
 	Name = "DunkLuckyBlockController",
@@ -407,6 +408,13 @@ function DunkLuckyBlockController:Start()
 	--      prête côté Roblox même si l'appel a succeed. On retry plus tard.
 	local cachedThumbnailUrl = nil
 	local function loadPlayerThumbnail()
+		-- Studio local test players (Player1, Player2, ...) ont un UserId négatif
+		-- ou nul. GetUserThumbnailAsync ne résout jamais pour ces UserIds : on
+		-- skip immédiatement pour éviter 6 retries inutiles + spam de warn dans
+		-- la console Studio. En live, UserId est toujours > 0.
+		if not player or (player.UserId or 0) <= 0 then
+			return nil
+		end
 		if cachedThumbnailUrl then
 			return cachedThumbnailUrl
 		end
@@ -853,6 +861,124 @@ function DunkLuckyBlockController:Start()
 		localWaveModel = nil
 	end
 
+	-- ===== BillboardGui d'info au-dessus du joueur transformé =====
+	-- 100% client : s'aligne visuellement sur le "SpinRevealInfo" créé côté
+	-- serveur pendant le spin reveal (même dimensions, même police, même ordre
+	-- de labels, même couleurs). Recréé ici plutôt que repliqué pour rester
+	-- 100% local au joueur (pas de bandwidth, pas de visibilité inutile pour
+	-- les autres clients).
+	local localBrainrotBillboard = nil
+	-- Map [BillboardGui] = previousEnabled, pour rétablir l'état originel des
+	-- billboards natifs qu'on a cachés pendant la phase brainrot.
+	local suppressedNativeBillboards = nil
+	-- Génération : incrémenté à chaque takeControl/releaseControl. La coroutine
+	-- de création du billboard capture la valeur courante et vérifie qu'elle
+	-- est toujours valide avant de poser la référence : évite qu'un dunk
+	-- enchainé ne laisse une vieille coroutine remettre un billboard orphelin
+	-- ou un suppressedNativeBillboards stale.
+	local billboardGeneration = 0
+
+	local function destroyLocalBrainrotBillboard()
+		if localBrainrotBillboard then
+			if localBrainrotBillboard.Parent then
+				localBrainrotBillboard:Destroy()
+			end
+			localBrainrotBillboard = nil
+		end
+		if suppressedNativeBillboards then
+			for bb, prev in pairs(suppressedNativeBillboards) do
+				if bb and bb.Parent then
+					bb.Enabled = prev
+				end
+			end
+			suppressedNativeBillboards = nil
+		end
+	end
+
+	-- Cherche un BillboardGui natif déjà sur le visual (parenté par le
+	-- serveur ou attaché à l'asset) et le désactive proprement (sans le
+	-- détruire) pour qu'on puisse le restaurer au releaseControl.
+	local function suppressNativeBillboards(visual)
+		suppressedNativeBillboards = suppressedNativeBillboards or {}
+		for _, d in ipairs(visual:GetDescendants()) do
+			if d:IsA("BillboardGui") and d ~= localBrainrotBillboard then
+				suppressedNativeBillboards[d] = d.Enabled
+				d.Enabled = false
+			end
+		end
+	end
+
+	-- Construit le BillboardGui (Nom, Rareté, CPS) en miroir de SpinRevealInfo
+	-- et l'attache à la PrimaryPart du visual.
+	local function buildLocalBrainrotBillboard(visual, brainrotName)
+		if not visual or not visual.PrimaryPart then return end
+		local info = BrainrotInfo.GetInfo(brainrotName)
+		if not info then return end
+
+		local bb = Instance.new("BillboardGui")
+		bb.Name = "PlayerBrainrotInfo"
+		bb.Adornee = visual.PrimaryPart
+		bb.Size = UDim2.new(4, 0, 1.6, 0)
+		bb.StudsOffsetWorldSpace = Vector3.new(0, 4, 0)
+		bb.AlwaysOnTop = true
+		bb.LightInfluence = 0
+		bb.MaxDistance = 200
+		bb.Parent = visual.PrimaryPart
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layout.VerticalAlignment = Enum.VerticalAlignment.Top
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = bb
+
+		local function mkLabel(text, color, order)
+			local l = Instance.new("TextLabel")
+			l.BackgroundTransparency = 1
+			l.Size = UDim2.new(1, 0, 1 / 3, 0)
+			l.Font = Enum.Font.GothamBlack
+			l.Text = text
+			l.TextColor3 = color
+			l.TextScaled = true
+			l.TextStrokeTransparency = 0
+			l.TextStrokeColor3 = Color3.new(0, 0, 0)
+			l.LayoutOrder = order
+			l.Parent = bb
+		end
+		mkLabel(info.FullName, Color3.fromRGB(255, 255, 255), 1)
+		mkLabel(info.RarityType, info.RarityColor, 2)
+		mkLabel("$" .. BrainrotInfo.FormatShort(info.CashPerSecond) .. "/s",
+			Color3.fromRGB(120, 230, 120), 3)
+
+		localBrainrotBillboard = bb
+	end
+
+	-- Attend (avec timeout) que le PlayerBrainrotVisual apparaisse dans le
+	-- character. Le serveur le crée via PlayerBrainrotTransform, donc il y a
+	-- toujours un petit décalage de réplication après la phase BrainrotPicked.
+	-- On poll plutôt que d'attendre ChildAdded pour rester robuste si le
+	-- character est re-spawné pendant l'attente (CharacterAdded émet un nouveau
+	-- character, l'ancien part).
+	local function waitForBrainrotVisual(character, timeout)
+		if not character or not character.Parent then return nil end
+		local deadline = os.clock() + (timeout or 3)
+		while os.clock() < deadline do
+			if not character.Parent then return nil end
+			local v = character:FindFirstChild("PlayerBrainrotVisual")
+			if v then
+				-- Si la PrimaryPart n'est pas encore replicate, attend une
+				-- frame de plus (max 1s).
+				local pwait = os.clock() + 1
+				while v.Parent and not v.PrimaryPart and os.clock() < pwait do
+					task.wait()
+				end
+				return (v.Parent and v.PrimaryPart) and v or nil
+			end
+			task.wait(0.1)
+		end
+		return nil
+	end
+
 	local function releaseControl(killedByWave)
 		-- Stoppe la boucle de freeze si elle tourne.
 		if frozenStateConn then
@@ -895,6 +1021,12 @@ function DunkLuckyBlockController:Start()
 		-- Le client efface juste sa référence locale.
 		attachedBrainrotVisual = nil
 		currentBrainrotWalkSpeed = nil
+
+		-- Cleanup du BillboardGui local + restaure les billboards natifs cachés.
+		-- Incrémenté aussi pour invalider toute coroutine de création encore en
+		-- cours depuis le takeControl correspondant.
+		billboardGeneration += 1
+		destroyLocalBrainrotBillboard()
 
 		camera.CameraType = Enum.CameraType.Custom
 		local character = player.Character
@@ -1037,6 +1169,31 @@ function DunkLuckyBlockController:Start()
 		camera.CameraType = Enum.CameraType.Custom
 		camera.CameraSubject = humanoid
 
+		-- BillboardGui d'info (Nom / Rareté / CPS) calqué sur "SpinRevealInfo".
+		-- 100% client : on attend que le PlayerBrainrotVisual server-spawned
+		-- arrive côté client, on supprime/cache les billboards déjà présents
+		-- (au cas où le serveur en aurait ajouté un), puis on greffe le nôtre
+		-- sur la PrimaryPart. Le tout dans une coroutine pour ne pas bloquer
+		-- la suite de takeControl si la réplication tarde. On capture une
+		-- génération locale pour invalider proprement la coroutine si un
+		-- nouveau takeControl/releaseControl arrive avant qu'on ait fini
+		-- d'attendre le visual.
+		destroyLocalBrainrotBillboard()
+		billboardGeneration += 1
+		local myGen = billboardGeneration
+		task.spawn(function()
+			local char = player.Character
+			if not char then return end
+			local visual = waitForBrainrotVisual(char, 3)
+			if myGen ~= billboardGeneration then return end
+			if not visual then return end
+			-- Sync l'attachedBrainrotVisual avec la vraie référence dès qu'elle
+			-- est connue (avant on avait potentiellement le marker `true`).
+			attachedBrainrotVisual = visual
+			suppressNativeBillboards(visual)
+			buildLocalBrainrotBillboard(visual, brainrotName)
+		end)
+
 		-- Heartbeat de freeze : tant que _G.DunkBrainrotFrozen est true (pendant
 		-- WaveRise + showcase), on remet WalkSpeed=0 et on bloque le saut. Dès
 		-- que le flag retombe, on rétablit WalkSpeed=targetSpeed pour relancer
@@ -1145,8 +1302,13 @@ function DunkLuckyBlockController:Start()
 			hum.PlatformStand = true
 			hum.AutoRotate = false
 			-- Désactive tous les states pour bloquer toute simulation interne.
+			-- IMPORTANT : on saute Enum.HumanoidStateType.None, qui n'est PAS
+			-- une valeur acceptée par SetStateEnabled (le moteur log un warning
+			-- "Invalid state passed to SetStateEnabled" même sous pcall).
 			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
-				pcall(function() hum:SetStateEnabled(state, false) end)
+				if state ~= Enum.HumanoidStateType.None then
+					pcall(function() hum:SetStateEnabled(state, false) end)
+				end
 			end
 			local animator = hum:FindFirstChildOfClass("Animator")
 			if animator then

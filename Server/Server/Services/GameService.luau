@@ -72,7 +72,16 @@ local REBIRTH_BASE_COST = 1000
 local REBIRTH_COST_MULTIPLIER = 10
 local MAX_PLOTS = 5
 local MAX_SLOT_LEVEL = 21
-local PLOT_Z_SPACING = -46
+
+-- Décalages Z par plot (ordre physique de gauche à droite : 5, 3, 1, 2, 4).
+-- Les valeurs proviennent du nouveau placement des Plots dans le Workspace.
+local PLOT_Z_OFFSETS = {
+	[1] = -92,
+	[2] = -46,
+	[3] = -138,
+	[4] = 0,
+	[5] = -184,
+}
 
 local SLOT_UPGRADE_COSTS = {
 	5000000, 25000000, 75000000, 100000000, 250000000,
@@ -293,7 +302,7 @@ local function getFloorAndSlotForLevel(level)
 end
 
 local function getPlotZOffset(plotNumber)
-	return (plotNumber - 1) * PLOT_Z_SPACING
+	return PLOT_Z_OFFSETS[plotNumber] or 0
 end
 
 local function placeFloor(plotNumber, floorNumber)

@@ -500,12 +500,12 @@ end
 --   Hacker  : 1 / 666   ≈ 0.15015%
 --   Rainbow : 1 / 5000  = 0.02%
 local MUTATION_ROLLS = {
-	{ name = "Rainbow", chance = 1 / 5000 },
-	{ name = "Hacker",  chance = 1 / 666  },
-	{ name = "Galaxy",  chance = 1 / 250  },
-	{ name = "Lava",    chance = 1 / 100  },
-	{ name = "Diamond", chance = 1 / 50   },
-	{ name = "Gold",    chance = 1 / 25   },
+	{ name = "Rainbow", chance = 1 / 2500 },
+	{ name = "Hacker",  chance = 1 / 333  },
+	{ name = "Galaxy",  chance = 1 / 125  },
+	{ name = "Lava",    chance = 1 / 50   },
+	{ name = "Diamond", chance = 1 / 25   },
+	{ name = "Gold",    chance = 1 / 12   },
 }
 
 -- Tire une mutation ou nil (= reste Normal). Tests indépendants du plus rare
@@ -928,7 +928,9 @@ local function runSequence(player, grade, fill)
 	-- la distance, comme un projectile réel (vitesse fixe en studs/s).
 	-- Aucun cap : un tir court (~50 studs) prend ~0.25s de vol, un tir long
 	-- (~2700 studs) prend ~12s. L'animation s'étire ou se contracte d'elle-même.
-	local FLIGHT_SPEED_STUDS_PER_SEC = 105
+	-- Tuning : 124 studs/s (~+18% par rapport à l'ancienne valeur de 105) pour
+	-- un vol légèrement plus rapide / plus punchy sans casser la cinématique.
+	local FLIGHT_SPEED_STUDS_PER_SEC = 124
 	local flightDuration = math.max(0.8, distance / FLIGHT_SPEED_STUDS_PER_SEC)
 	-- Arc proportionnel à la distance, sans cap dur mais factor modéré pour
 	-- garder un "U" lisible sans monter trop haut. ~12% de la distance,
