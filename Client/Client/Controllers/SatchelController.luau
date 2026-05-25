@@ -106,6 +106,14 @@ local IconModule
 
 local inventoryCells = {}
 
+-- Helper : retourne true si le joueur est actuellement transformé en brainrot
+-- (attribut posé par PlayerBrainrotTransform côté serveur, répliqué ici).
+-- Utilisé partout où on ouvre / affiche l'inventaire pour bloquer toute
+-- interaction avec le Satchel pendant la transformation.
+local function isPlayerBrainrot()
+	return player:GetAttribute("IsBrainrot") == true
+end
+
 -- État du drag & drop depuis l'inventaire vers la hotbar.
 local dragState = {
 	active = false,
@@ -733,6 +741,10 @@ local function equipOrUnequipTool(tool)
 	-- boucles d'événement (equip -> unequip -> equip...) qui font crash le
 	-- Studio.
 	if _G.SatchelEquipBlocked then return end
+	-- Bloqué aussi tant que le joueur est sous forme brainrot : aucun tool
+	-- ne doit pouvoir être équipé / déséquipé via les touches 1-9 ou un clic
+	-- accidentel sur un slot.
+	if isPlayerBrainrot() then return end
 
 	-- Cooldown anti-spam (cf commentaire ci-dessus).
 	local now = os.clock()
@@ -1214,6 +1226,12 @@ end
 
 
 function SatchelController:SetInventoryOpen(open)
+	-- Bloque toute ouverture pendant que le joueur est sous forme brainrot.
+	-- Toute tentative d'ouverture (raccourci B, topbar icon, code externe)
+	-- est convertie en "force-close" pour garantir que rien ne reste affiché.
+	if open and isPlayerBrainrot() then
+		open = false
+	end
 	inventoryOpen = open
 	if inventoryGui then
 		inventoryGui.Enabled = open
@@ -1251,6 +1269,15 @@ local function createTopbarIcon()
 	topbarIcon:bindToggleKey(Enum.KeyCode.B)
 
 	topbarIcon.selected:Connect(function()
+		-- Bloque l'ouverture via l'icône topbar (clic ou raccourci B) tant que
+		-- le joueur est sous forme brainrot. On force la désélection visuelle
+		-- pour que l'icône ne reste pas "appuyée".
+		if isPlayerBrainrot() then
+			if topbarIcon.isSelected then
+				topbarIcon:deselect("Inventory", topbarIcon)
+			end
+			return
+		end
 		if not inventoryOpen then
 			SatchelController:SetInventoryOpen(true)
 		end
@@ -1393,6 +1420,69 @@ function SatchelController:Start()
 	end)
 
 	player:GetPropertyChangedSignal("Character"):Connect(applySelection)
+
+	-- Reaction à la transformation brainrot : quand l'attribut bascule à true,
+	-- on force la fermeture du panneau d'inventaire et on cache la hotbar.
+	-- Quand il revient à false (joueur retrouve son character normal), on
+	-- restaure la visibilité de la hotbar SAUF si un autre flag UI nous
+	-- demande de la garder cachée (ex. KickZoneController via
+	-- _G.SatchelEquipBlocked, qui cache le satchel quand on est dans la
+	-- zone Kick juste après un dunk).
+	local function applyBrainrotState()
+		local isBrainrot = isPlayerBrainrot()
+		if isBrainrot then
+			-- Force la fermeture du panneau d'inventaire et cache la hotbar.
+			if inventoryOpen then
+				SatchelController:SetInventoryOpen(false)
+			end
+			if inventoryGui then inventoryGui.Enabled = false end
+			if hotbarGui then hotbarGui.Enabled = false end
+			-- Cache aussi l'icône topbar (sac à dos en haut à gauche). Sans ça,
+			-- l'icône reste cliquable et visible même quand la hotbar est cachée.
+			if topbarIcon then
+				if topbarIcon.isSelected then
+					pcall(function() topbarIcon:deselect("Inventory", topbarIcon) end)
+				end
+				pcall(function() topbarIcon:setEnabled(false) end)
+			end
+		else
+			-- Réaffiche la hotbar et l'icône topbar uniquement si aucun autre
+			-- système ne demande qu'elles restent cachées (KickZone, etc.).
+			if not _G.SatchelEquipBlocked then
+				if hotbarGui then hotbarGui.Enabled = true end
+				if topbarIcon then
+					pcall(function() topbarIcon:setEnabled(true) end)
+				end
+			end
+		end
+	end
+
+	player:GetAttributeChangedSignal("IsBrainrot"):Connect(applyBrainrotState)
+	-- Etat initial (au cas où l'attribut serait déjà set au join, ex. rejoin
+	-- pendant qu'une session brainrot du serveur était encore active).
+	applyBrainrotState()
+
+	-- Garde-fou contre les écritures externes : pendant que le joueur est sous
+	-- forme brainrot, n'importe quel autre controller (KickZoneController,
+	-- TopbarPlus, code tiers) pourrait remettre Hotbar/Inventory.Enabled à
+	-- true. On observe les changements et on force le retour à false tant que
+	-- IsBrainrot est vrai. Sans cette garde, la téléportation du joueur hors
+	-- de KickReady pendant la phase WaveChase déclenche un setSatchelVisible(true)
+	-- qui rallumait la hotbar visible pendant toute la course.
+	if hotbarGui then
+		hotbarGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+			if hotbarGui.Enabled and isPlayerBrainrot() then
+				hotbarGui.Enabled = false
+			end
+		end)
+	end
+	if inventoryGui then
+		inventoryGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+			if inventoryGui.Enabled and isPlayerBrainrot() then
+				inventoryGui.Enabled = false
+			end
+		end)
+	end
 
 	print("[SatchelController] Hotbar + inventaire initialisés.")
 end

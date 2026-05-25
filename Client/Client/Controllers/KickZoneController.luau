@@ -48,7 +48,18 @@ function KickZoneController:Start()
 	local function getSatchelInventory()
 		return playerGui:FindFirstChild("SatchelInventory")
 	end
+	local function isPlayerBrainrot()
+		return player:GetAttribute("IsBrainrot") == true
+	end
 	local function setSatchelVisible(visible)
+		-- Le SatchelController est seul décideur quand le joueur est sous forme
+		-- brainrot : on ne re-active JAMAIS le sac depuis ici dans ce cas. Sans
+		-- cette garde, la téléportation hors KickReady pendant la séquence Dunk
+		-- (joueur transformé à impactPos) déclenche onExitZone() qui rallumait
+		-- la hotbar pendant toute la phase WaveChase / fuite.
+		if visible and isPlayerBrainrot() then
+			return
+		end
 		local hb = getSatchelHotbar()
 		if hb then hb.Enabled = visible end
 		if not visible then

@@ -19,6 +19,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
 
 local PlayerBrainrotTransform = {}
 
@@ -313,6 +314,11 @@ function PlayerBrainrotTransform.Apply(player, brainrotName)
 		savedTransparencies = saved,
 	}
 
+	-- Marqueur d'etat lu par les controllers client (SatchelController, etc.)
+	-- pour cacher l'UI inventaire / bloquer les raccourcis tant que le joueur
+	-- est sous forme brainrot. Repliqué automatiquement à tous les clients.
+	player:SetAttribute("IsBrainrot", true)
+
 	return visual
 end
 
@@ -325,6 +331,11 @@ end
 ]]
 function PlayerBrainrotTransform.Remove(player, skipRestore)
 	if not player then return end
+	-- On ecrit toujours l'attribut a false, meme si aucune entree active n'existe :
+	-- garantit qu'un IsBrainrot orphelin (player respawn pendant la transformation)
+	-- soit nettoye et que le SatchelController reactive l'inventaire.
+	pcall(function() player:SetAttribute("IsBrainrot", false) end)
+
 	local entry = active[player.UserId]
 	if not entry then return end
 	active[player.UserId] = nil
@@ -344,5 +355,31 @@ end
 function PlayerBrainrotTransform.IsActive(player)
 	return player and active[player.UserId] ~= nil
 end
+
+-- Filet de securite : si un character se reset (respawn, mort, /c suivi de
+-- mort, etc.), on nettoie systematiquement la transformation. Sans ca,
+-- l'attribut IsBrainrot pourrait rester a true sur le Player apres un reset
+-- (le visuel etait parente DANS le character donc deja detruit), bloquant
+-- l'UI inventaire indefiniment cote client.
+local function hookPlayer(player)
+	player.CharacterAdded:Connect(function()
+		-- skipRestore = true : le nouveau character est tout neuf, rien a
+		-- restaurer (les references stockees pointent sur l'ancien character).
+		PlayerBrainrotTransform.Remove(player, true)
+	end)
+	player.CharacterRemoving:Connect(function()
+		-- Nettoie l'entree avant que le character ne soit detruit pour eviter
+		-- les references pendantes dans `active`.
+		PlayerBrainrotTransform.Remove(player, true)
+	end)
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	hookPlayer(player)
+end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(function(player)
+	active[player.UserId] = nil
+end)
 
 return PlayerBrainrotTransform
