@@ -1974,41 +1974,199 @@ function DunkLuckyBlockController:Start()
 				camera.CameraType = Enum.CameraType.Scriptable
 				_G.DunkBlockCamera = true
 
-				-- Tick sonore à chaque brainrot affiché pendant le roll : le
-				-- serveur remplace le modèle enfant du spinMount à chaque "switch",
-				-- donc ChildAdded fire pile au bon moment. Volume bas pour rester
-				-- agréable même avec des switchs rapides.
-				local tickConn = spinMount.ChildAdded:Connect(function(child)
-					if child:IsA("Model") or child:IsA("BasePart") then
-						playSound2D(ROLL_TICK_SOUND_ID, 0.35)
+				-- POLISH (player feedback) : auparavant le serveur cyclait des
+				-- silhouettes de brainrots dans spinMount (server.Parent= ...)
+				-- ce qui REPLIQUAIT la création/destruction de Models au taux
+				-- réseau (~20Hz max). Conséquence vue par le joueur : roll à 2 FPS.
+				-- Désormais l'animation est intégralement gérée ici, en LOCAL :
+				-- on clone les templates depuis ReplicatedStorage.Brainrots et on
+				-- fait le swap dans une RunService.RenderStepped à 60+ Hz, exactement
+				-- comme l'ancienne logique serveur (même courbe ^5, mêmes intervalles).
+				local poolNames = (data and data.PoolNames) or {}
+				local spinDuration = (data and data.SpinDuration) or 2.2
+				local switchMin = (data and data.SwitchMin) or 0.03
+				local switchMax = (data and data.SwitchMax) or 0.7
 
-						-- Oriente le brainrot vers la caméra dès qu'il apparaît.
-						-- camPos est calculé comme dans la boucle RenderStepped
-						-- ci-dessous :
-						--   target = spinMount.Position + (0, 2, 0)
-						--   camPos = target + (7, 1.5, 0)
-						-- On garde la coordonnée Y d'origine du modèle dans le
-						-- lookAtTarget : la rotation est purement horizontale (yaw),
-						-- sinon le brainrot pencherait la tête vers le haut/bas.
-						--
-						-- Compensation X de +90° : les modèles sont modélisés
-						-- "face contre terre" (axe Look = haut du crâne). Sans cette
-						-- rotation locale, lookAt enverrait le sommet du crâne vers la
-						-- caméra et le visage regarderait le sol.
+				local brainrotsFolder = ReplicatedStorage:FindFirstChild("Brainrots")
+				local function findTemplateByName(name)
+					if not brainrotsFolder or not name then return nil end
+					for _, rarityFolder in ipairs(brainrotsFolder:GetChildren()) do
+						if rarityFolder:IsA("Folder") then
+							local m = rarityFolder:FindFirstChild(name)
+							if m and m:IsA("Model") then return m end
+						end
+					end
+					return nil
+				end
+
+				-- Pré-résolution des templates à partir des noms.
+				local templates = {}
+				for _, n in ipairs(poolNames) do
+					local tpl = findTemplateByName(n)
+					if tpl then table.insert(templates, tpl) end
+				end
+
+				-- Container local : un Model fantôme dans le Workspace pour parenter
+				-- les silhouettes courantes. Les autres clients ne le voient pas (il
+				-- est créé côté client uniquement). On le détruit à la fin du spin
+				-- ou quand spinMount disparaît (replication du serveur).
+				local localSpinHolder = Instance.new("Folder")
+				localSpinHolder.Name = "LocalDunkSpinDisplay"
+				localSpinHolder.Parent = Workspace
+
+				local currentLocalDisplay = nil
+
+				local function destroyCurrentLocalDisplay()
+					if currentLocalDisplay and currentLocalDisplay.Parent then
+						currentLocalDisplay:Destroy()
+					end
+					currentLocalDisplay = nil
+				end
+
+				local function localShowSilhouette(template)
+					destroyCurrentLocalDisplay()
+					if not template or not spinMount.Parent then return end
+
+					local clone = template:Clone()
+					-- Strip scripts pour éviter qu'ils tournent côté client.
+					for _, d in ipairs(clone:GetDescendants()) do
+						if d:IsA("Script") or d:IsA("LocalScript") then
+							d:Destroy()
+						end
+					end
+
+					-- PrimaryPart fallback.
+					if not clone.PrimaryPart then
+						for _, d in ipairs(clone:GetDescendants()) do
+							if d:IsA("BasePart") then
+								clone.PrimaryPart = d
+								break
+							end
+						end
+					end
+
+					-- Pose silhouette + propriétés sûres (anchored, no-collide, no-touch).
+					for _, d in ipairs(clone:GetDescendants()) do
+						if d:IsA("BasePart") then
+							d.Anchored = true
+							d.CanCollide = false
+							d.CanQuery = false
+							d.CanTouch = false
+							d.Massless = true
+							if d:IsA("MeshPart") then
+								d.TextureID = ""
+							end
+							d.Color = Color3.fromRGB(0, 0, 0)
+							d.Material = Enum.Material.Neon
+							d.CastShadow = false
+						elseif d:IsA("SurfaceAppearance") or d:IsA("Decal") or d:IsA("Texture") then
+							d:Destroy()
+						elseif d:IsA("ParticleEmitter") or d:IsA("PointLight") or d:IsA("SpotLight") then
+							d:Destroy()
+						elseif d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+							d:Destroy()
+						end
+					end
+
+					if clone:IsA("Model") and clone.PrimaryPart then
+						-- Oriente le brainrot face à la caméra et pose ses pieds sur le sol.
+						local yaw90 = CFrame.Angles(0, -math.pi * 0.5, 0)
+						local templateRot = template:GetPivot() - template:GetPivot().Position
+						local baseRot = yaw90 * templateRot
+						clone:PivotTo(CFrame.new(spinMount.Position) * baseRot)
+
+						-- Correction Y : abaisse le clone pour que son point le plus
+						-- bas touche pile la position de spinMount.
+						local minY = math.huge
+						for _, d in ipairs(clone:GetDescendants()) do
+							if d:IsA("BasePart") then
+								local cf = d.CFrame
+								local hx, hy, hz = d.Size.X * 0.5, d.Size.Y * 0.5, d.Size.Z * 0.5
+								for sx = -1, 1, 2 do
+									for sy = -1, 1, 2 do
+										for sz = -1, 1, 2 do
+											local wp = cf * Vector3.new(sx * hx, sy * hy, sz * hz)
+											if wp.Y < minY then minY = wp.Y end
+										end
+									end
+								end
+							end
+						end
+						if minY ~= math.huge then
+							local correction = spinMount.Position.Y - minY
+							clone:PivotTo(clone:GetPivot() + Vector3.new(0, correction, 0))
+						end
+
+						-- Oriente vers la caméra (même logique que l'ancien tickConn).
 						local target = spinMount.Position + Vector3.new(0, 2, 0)
 						local camPos = target + Vector3.new(7, 1.5, 0)
-						local modelPos = child:GetPivot().Position
+						local modelPos = clone:GetPivot().Position
 						local lookAtTarget = Vector3.new(camPos.X, modelPos.Y, camPos.Z)
-						child:PivotTo(
+						clone:PivotTo(
 							CFrame.lookAt(modelPos, lookAtTarget)
 							* CFrame.Angles(math.rad(90), 0, 0)
 						)
 					end
+
+					clone.Parent = localSpinHolder
+					currentLocalDisplay = clone
+				end
+
+				-- Boucle de cycling LOCALE : on swap les silhouettes selon la même
+				-- courbe ^5 que l'ancienne logique serveur. RenderStepped garantit
+				-- une lecture frame-perfect de l'écoulé.
+				local localSpinStart = os.clock()
+				local nextSwitchTime = localSpinStart
+				local lastTickAt = 0
+				local localSpinConn
+				localSpinConn = RunService.RenderStepped:Connect(function()
+					if not _G.DunkBlockCamera or not spinMount.Parent then
+						if localSpinConn then localSpinConn:Disconnect() localSpinConn = nil end
+						destroyCurrentLocalDisplay()
+						if localSpinHolder and localSpinHolder.Parent then
+							localSpinHolder:Destroy()
+						end
+						return
+					end
+					local now = os.clock()
+					local elapsed = now - localSpinStart
+					if elapsed >= spinDuration then
+						-- Fin du spin : on cache le local display pour laisser place
+						-- au brainrot final spawné par le serveur (en couleur).
+						destroyCurrentLocalDisplay()
+						if localSpinHolder and localSpinHolder.Parent then
+							localSpinHolder:Destroy()
+						end
+						if localSpinConn then localSpinConn:Disconnect() localSpinConn = nil end
+						return
+					end
+
+					if now >= nextSwitchTime then
+						local progress = math.clamp(elapsed / spinDuration, 0, 1)
+						local eased = progress ^ 5
+						local interval = switchMin + (switchMax - switchMin) * eased
+						nextSwitchTime = now + interval
+
+						if #templates > 0 then
+							local pick = templates[math.random(1, #templates)]
+							localShowSilhouette(pick)
+						end
+
+						-- Tick sonore (taux limité pour rester agréable aux switchs rapides).
+						if now - lastTickAt >= switchMin * 0.9 then
+							playSound2D(ROLL_TICK_SOUND_ID, 0.35)
+							lastTickAt = now
+						end
+					end
 				end)
+
 				spinMount.AncestryChanged:Connect(function(_, parent)
-					if not parent and tickConn then
-						tickConn:Disconnect()
-						tickConn = nil
+					if not parent then
+						if localSpinConn then localSpinConn:Disconnect() localSpinConn = nil end
+						destroyCurrentLocalDisplay()
+						if localSpinHolder and localSpinHolder.Parent then
+							localSpinHolder:Destroy()
+						end
 					end
 				end)
 

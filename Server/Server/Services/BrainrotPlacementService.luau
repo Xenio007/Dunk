@@ -1572,13 +1572,12 @@ end
 
 -- ===== AUTO-COLLECT GAMEPASS =====
 --
--- Pour les joueurs qui possèdent le gamepass AutoCollect, on claim leurs
--- boutons toutes les `AUTO_COLLECT_INTERVAL` secondes sans qu'ils aient à
--- marcher dessus. Réutilise ClaimButton (en mode silent) pour garder une
--- source de vérité unique : même calcul du cash gagné, même reset de
--- l'accumulateur, même application du cap. La seule différence est qu'on
--- ne joue PAS l'animation "press" du bouton (silent = true) pour ne pas
--- spammer un effet visuel toutes les ticks.
+-- Pour les joueurs qui possèdent le gamepass AutoCollect, on crédite leur
+-- Cash en continu (10 Hz) sans qu'ils aient à marcher sur les boutons.
+-- Pour que l'affichage du Cash monte de manière fluide, on ne passe PAS par
+-- ClaimButton (qui floor() la durée en secondes entières et a un cooldown
+-- anti-spam de 0.5s). On accumule le cash fractionnaire localement et on
+-- l'écrit sur Cash.Value dès qu'il vaut au moins 1 unité entière.
 --
 -- Source de vérité du flag : Player:GetAttribute("HasAutoCollect").
 -- Posé par GamepassService :
@@ -1586,8 +1585,12 @@ end
 --   * sur PromptGamePassPurchaseFinished (achat live)
 -- Plus rapide qu'un appel DataService:HasGamepass et évite la fenêtre
 -- de race entre :Start de DataService et :Start de BrainrotPlacementService.
-local AUTO_COLLECT_INTERVAL = 2
+local AUTO_COLLECT_TICK = 1     -- 1 Hz : le Cash monte d'un coup chaque seconde
 local AUTO_COLLECT_ATTR = "HasAutoCollect"
+
+-- [userId] = reliquat fractionnaire (centimes virtuels). Conservé entre les
+-- ticks pour que rien ne soit perdu : sum(integer added) ~ totalCps * elapsed.
+local autoCollectResidual = {}
 
 local function playerHasAutoCollect(player)
 	-- Fast path : attribute Player (set par GamepassService).
@@ -1603,10 +1606,12 @@ local function playerHasAutoCollect(player)
 	return false
 end
 
-local function autoCollectTickForPlayer(player)
-	if not playerHasAutoCollect(player) then return end
+-- Somme des CPS de tous les boutons occupés du plot + reset de leur
+-- BTN_ACCUM_START (sinon le client continue d'afficher du cash sur les
+-- boutons et un touch physique recréditerait la même somme).
+local function consumePlotCpsAndReset(player)
 	local plot = getPlayerPlot(player)
-	if not plot then return end
+	if not plot then return 0 end
 	local floorsFolder = plot:FindFirstChild("Floors")
 	local containers = {}
 	if floorsFolder then
@@ -1618,29 +1623,58 @@ local function autoCollectTickForPlayer(player)
 	local rootButtons = plot:FindFirstChild("Buttons")
 	if rootButtons then table.insert(containers, rootButtons) end
 
+	local now = Workspace:GetServerTimeNow()
+	local totalCps = 0
 	for _, container in ipairs(containers) do
 		for _, btn in ipairs(container:GetChildren()) do
 			if btn:IsA("BasePart") then
-				local cps = btn:GetAttribute(BTN_CPS) or 0
+				local cps = tonumber(btn:GetAttribute(BTN_CPS)) or 0
 				if cps > 0 then
-					-- silent = true : pas d'animation "press" puisque le
-					-- joueur n'a pas physiquement marché sur le bouton.
-					BrainrotPlacementService:ClaimButton(player, btn, true)
+					totalCps = totalCps + cps
+					-- Reset l'accumulateur visuel : le bouton repart à $0 côté
+					-- client puisqu'on vient de créditer le joueur à sa place.
+					btn:SetAttribute(BTN_ACCUM_START, now)
 				end
 			end
 		end
+	end
+	return totalCps
+end
+
+local function autoCollectTickForPlayer(player, dt)
+	if not playerHasAutoCollect(player) then
+		autoCollectResidual[player.UserId] = nil
+		return
+	end
+
+	local totalCps = consumePlotCpsAndReset(player)
+	if totalCps <= 0 then return end
+
+	local cashVal = player:FindFirstChild("Cash")
+	if not cashVal then return end
+
+	-- Accumule le cash fractionnaire dans un reliquat ; écrit Cash.Value
+	-- dès qu'on a au moins 1 unité entière pour que la display monte
+	-- progressivement (1, 2, 3...) plutôt que par paliers de cps*tick.
+	local residual = autoCollectResidual[player.UserId] or 0
+	local accumulated = residual + totalCps * dt
+	local whole = math.floor(accumulated)
+	autoCollectResidual[player.UserId] = accumulated - whole
+
+	if whole > 0 then
+		cashVal.Value = cashVal.Value + whole
 	end
 end
 
 local function startAutoCollectLoop()
 	task.spawn(function()
 		while true do
-			task.wait(AUTO_COLLECT_INTERVAL)
+			local dt = task.wait(AUTO_COLLECT_TICK)
 			for _, player in ipairs(Players:GetPlayers()) do
 				-- Wrappe chaque joueur dans un pcall pour qu'une erreur sur
 				-- un joueur (ex : plot détruit pendant le walk) n'arrête
 				-- pas la boucle pour les autres.
-				pcall(autoCollectTickForPlayer, player)
+				pcall(autoCollectTickForPlayer, player, dt)
 			end
 		end
 	end)
@@ -1896,112 +1930,30 @@ function BrainrotPlacementService:_performUpgrade(player, slotPart)
 	buyUpgradeEvent:FireClient(player, true, string.format("%s amélioré au niveau %d", fullName, newLevel))
 end
 
--- Spawne l'UpgradeVFX dans le brainrot placé, échelonné selon sa taille.
--- Chaque ParticleEmitter de UpgradeVFX porte des attributs configurés par
--- l'artiste pour orchestrer l'animation d'upgrade :
---   * EmitCount    (nombre, défaut = Rate ou 10) : nombre de particules à émettre
---   * EmitDelay    (secondes, défaut = 0)         : délai avant l'émission
---   * EmitDuration (secondes, défaut = 0)         : si > 0, l'emitter reste
---                                                   activé pendant cette durée
---                                                   (stream continu) ; sinon
---                                                   burst instantané via :Emit.
--- L'attachment est détruit après que tous les delays/durées soient passés ;
--- les particules déjà émises continuent leur vie dans l'espace monde.
-local function playUpgradeVfxOnBrainrot(clone, primary)
-	local vfxTemplate = ReplicatedStorage:FindFirstChild("VFX")
-	vfxTemplate = vfxTemplate and vfxTemplate:FindFirstChild("UpgradeVFX")
-	if not vfxTemplate or not primary then return end
-
-	local attach = vfxTemplate:Clone()
-	attach.Name = "UpgradeVFX_Active"
-	attach.Visible = true
-
-	-- Taille du brainrot : on prend la plus grande dimension de la BB pour
-	-- scaler le VFX. Ratio de 1 stud = emitters à leur taille d'origine.
-	local _, bbSize
-	if clone and clone:IsA("Model") then
-		_, bbSize = clone:GetBoundingBox()
-	else
-		bbSize = primary.Size
+-- POLISH (player feedback) : les particules d'UpgradeVFX étaient spawnées
+-- côté serveur, donc REPLIQUEES à tous les clients connectés. Chaque joueur
+-- voyait les particules d'upgrade des autres joueurs sur leurs plots, ce qui
+-- polluait sa vue.
+--
+-- Nouveau fonctionnement : on fire un RemoteEvent UNIQUEMENT à l'owner du
+-- plot avec une référence à la PrimaryPart cible. Le client (l'owner)
+-- recrée localement le VFX (clone du template UpgradeVFX dans son
+-- ReplicatedStorage) et joue les emitters. Les autres joueurs ne voient
+-- absolument rien : zéro réplication, zéro pollution visuelle.
+--
+-- IMPORTANT : on crée le RemoteEvent EAGER à module-load pour que le client
+-- (UpgradeVfxController) puisse le récupérer immédiatement au boot. Sans ça
+-- le client timeout en attendant le remote (10s) avant le 1er upgrade.
+local upgradeVfxEvent = RemotesAPI.GetEvent("PlayUpgradeVfxEvent")
+local function playUpgradeVfxOnBrainrot(clone, primary, owner)
+	_ = clone
+	if not primary or typeof(primary) ~= "Instance" or not primary:IsA("BasePart") then
+		return
 	end
-	local maxDim = math.max(bbSize.X, bbSize.Y, bbSize.Z)
-	-- Scale : ratio sur 6 studs de référence (taille moyenne d'un brainrot).
-	-- Plafonné entre 0.5x et 4x pour éviter les cas extrêmes.
-	local scale = math.clamp(maxDim / 6, 0.5, 4)
-
-	-- Pré-traite chaque emitter : scale des tailles ET lecture des attributs.
-	-- Les emitters sont désactivés par défaut ; on les pilote manuellement via
-	-- :Emit (burst) ou Enabled=true pendant EmitDuration (stream).
-	-- On track aussi la date à laquelle la DERNIÈRE particule de tout
-	-- l'attachment aura fini de vivre : emit_time + Lifetime.Max. En-dessous
-	-- de cette date, détruire l'attachment tuerait les particules encore
-	-- vivantes (Roblox : quand un ParticleEmitter est détruit, toutes ses
-	-- particules actives disparaissent aussi).
-	local emitters = {}
-	local maxAliveTime = 0
-	for _, d in ipairs(attach:GetDescendants()) do
-		if d:IsA("ParticleEmitter") then
-			local oldSeq = d.Size
-			local newKeys = {}
-			for _, kp in ipairs(oldSeq.Keypoints) do
-				table.insert(newKeys, NumberSequenceKeypoint.new(kp.Time, kp.Value * scale, kp.Envelope * scale))
-			end
-			d.Size = NumberSequence.new(newKeys)
-			d.Enabled = false
-
-			local emitDelay = tonumber(d:GetAttribute("EmitDelay")) or 0
-			local emitDuration = tonumber(d:GetAttribute("EmitDuration")) or 0
-			local emitCount = tonumber(d:GetAttribute("EmitCount"))
-			if emitCount == nil then
-				emitCount = d.Rate > 0 and d.Rate or 10
-			end
-
-			table.insert(emitters, {
-				emitter = d,
-				delay = math.max(0, emitDelay),
-				count = math.max(0, emitCount),
-				duration = math.max(0, emitDuration),
-			})
-
-			-- Durée de vie maximale d'une particule de cet emitter. NumberRange
-			-- a un champ .Max ; on l'utilise pour ne pas couper de particules.
-			local lifetimeMax = d.Lifetime.Max
-			local finish = emitDelay + emitDuration + lifetimeMax
-			if finish > maxAliveTime then maxAliveTime = finish end
-		end
+	if not owner or typeof(owner) ~= "Instance" or not owner:IsA("Player") then
+		return
 	end
-
-	attach.Parent = primary
-
-	-- Déclenche chaque emitter selon ses attributs.
-	for _, e in ipairs(emitters) do
-		task.delay(e.delay, function()
-			if not e.emitter or not e.emitter.Parent then return end
-			if e.duration > 0 then
-				-- Stream continu pendant EmitDuration, + burst initial s'il y a
-				-- un EmitCount (souvent utilisé pour pimenter le démarrage).
-				e.emitter.Enabled = true
-				if e.count > 0 then
-					e.emitter:Emit(e.count)
-				end
-				task.delay(e.duration, function()
-					if e.emitter and e.emitter.Parent then
-						e.emitter.Enabled = false
-					end
-				end)
-			elseif e.count > 0 then
-				e.emitter:Emit(e.count)
-			end
-		end)
-	end
-
-	-- Détruit l'attachment APRÈS la fin de vie de la dernière particule pour
-	-- ne pas tronquer l'animation. +0.1s de marge pour la frame de cleanup.
-	task.delay(maxAliveTime + 0.1, function()
-		if attach and attach.Parent then
-			attach:Destroy()
-		end
-	end)
+	upgradeVfxEvent:FireClient(owner, primary)
 end
 
 -- Applique un changement de niveau vers `newLevel` sur le slot, met à jour le
@@ -2065,7 +2017,9 @@ function BrainrotPlacementService:_applyUpgradeToLevel(player, slotPart, newLeve
 					BrainrotLabel.UpdateLevelAndCps(primary, newLevel, BrainrotUpgrade.GetCps(info.CashPerSecond, newLevel))
 				end
 				-- VFX d'upgrade scalant avec la taille du brainrot.
-				playUpgradeVfxOnBrainrot(clone, primary)
+				-- POLISH : envoyé UNIQUEMENT à l'owner du plot (pas répliqué
+				-- aux autres joueurs).
+				playUpgradeVfxOnBrainrot(clone, primary, player)
 			end
 		end
 	end
@@ -2303,6 +2257,7 @@ function BrainrotPlacementService:Start()
 		pendingUpgrades[plr.UserId] = nil
 		pendingMaxUpgrades[plr.UserId] = nil
 		lastUpgradeRequestAt[plr.UserId] = nil
+		autoCollectResidual[plr.UserId] = nil
 	end)
 
 	-- Studio / Replay: handle already-connected players.

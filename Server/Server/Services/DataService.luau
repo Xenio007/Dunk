@@ -721,6 +721,24 @@ local function onPlayerAdded(player)
 	local slotLevelVal = mk("IntValue", "SlotLevel", profile.s)
 	local speedLevelVal = mk("IntValue", "SpeedLevel", profile.sp)
 
+	-- leaderstats : Folder standard Roblox que le PlayerList (Tab) lit
+	-- automatiquement pour afficher des stats par joueur. On y met un mirror
+	-- du Cash. Vu que les valeurs Cash peuvent largement dépasser 2^31, on
+	-- utilise un NumberValue (et non un IntValue qui plafonne à ~2.1B).
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+	local cashStat = Instance.new("NumberValue")
+	cashStat.Name = "Cash"
+	cashStat.Value = profile.c
+	cashStat.Parent = leaderstats
+
+	-- Mirror Cash -> leaderstats.Cash (one-way : la source de vérité reste
+	-- player.Cash, leaderstats n'est qu'une vitrine pour le PlayerList).
+	cashVal:GetPropertyChangedSignal("Value"):Connect(function()
+		cashStat.Value = cashVal.Value
+	end)
+
 	-- Synchronisation Value -> profile.
 	local function sync(valInstance, key)
 		valInstance:GetPropertyChangedSignal("Value"):Connect(function()

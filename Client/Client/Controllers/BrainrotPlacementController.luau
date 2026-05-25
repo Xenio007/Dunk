@@ -99,6 +99,19 @@ local CLAIM_PITCH_MAX = 2.2        -- pitch le plus aigu (quand streak saturé)
 local CLAIM_PITCH_STEP = 0.12      -- hausse par claim consécutif
 local CLAIM_STREAK_RESET_TIME = 1.0 -- secondes sans claim avant retour à CLAIM_PITCH_BASE
 
+-- POLISH (player feedback) : on doit savoir, quand un ClaimTick fire sur un
+-- bouton, si ce bouton appartient au plot du LOCAL player. Sans ce filtre,
+-- chaque joueur entendait les sons de claim et voyait les popups/bursts des
+-- claims des AUTRES joueurs (parce que la barre des cash labels track tous
+-- les plots). On garde le tracking universel pour la barre `$X` qui tick
+-- silencieusement, mais on bloque les juicy effets (sound, +$XXX popup,
+-- burst de pièces) qui sont strictement locaux au joueur qui claim.
+local localPlayerPlot = nil
+local function isLocalPlayerButton(button)
+	if not localPlayerPlot or not localPlayerPlot.Parent then return false end
+	return button:IsDescendantOf(localPlayerPlot)
+end
+
 -- ===== STATE =====
 -- button -> {
 --   label            : TextLabel,
@@ -557,7 +570,12 @@ local function track(button)
 			playPress(state, button)
 
 			-- Juice: floating "+$XXX" popup + $ burst particles + sfx.
-			if claimed > 0 then
+			-- POLISH : juice STRICTEMENT local au joueur. Si le bouton n'est pas
+			-- sur le plot du local player, on saute toute l'animation visuelle
+			-- + sonore. Le label $0 / count-up reste en place pour que les
+			-- visiteurs voient la cash bar des autres plots se mettre à jour
+			-- normalement, mais sans le bruit / popup intrusif.
+			if claimed > 0 and isLocalPlayerButton(button) then
 				playClaimPopup(button, claimed)
 				playClaimBurst(button)
 				playClaimSound()
@@ -646,6 +664,11 @@ function BrainrotPlacementController:Start()
 		local plot = plots:FindFirstChild("Plot" .. plotNumVal.Value)
 		if not plot then return end
 		currentPlot = plot
+		-- POLISH : expose le plot du local player au filtre de juice (sound /
+		-- popup / burst). Tant que cette ref n'est pas posée, AUCUN juice ne
+		-- joue (aucun risque d'entendre les claims des autres plots avant que
+		-- le PlotNumber soit résolu).
+		localPlayerPlot = plot
 	end
 
 	plotNumVal:GetPropertyChangedSignal("Value"):Connect(resolveCurrentPlot)

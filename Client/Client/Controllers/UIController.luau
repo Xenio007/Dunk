@@ -8,6 +8,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local StarterGui = game:GetService("StarterGui")
 local TweenService = game:GetService("TweenService")
@@ -302,11 +303,70 @@ function UIController:Start()
 
 	-- === AFFICHAGE TEMPS RÉEL ===
 
-	local function updateCashDisplay()
+	-- Affichage du Cash : chaque changement de valeur déclenche une animation
+	-- linéaire de 0.5 s entre la valeur affichée courante et la nouvelle
+	-- valeur serveur. Si une nouvelle valeur arrive avant la fin de l'anim,
+	-- on relance une nouvelle anim de 0.5 s depuis la valeur actuellement
+	-- affichée (pas de saut, pas de retard).
+	-- - Ticks normaux (touch, AutoCollect, achat) : monte fluidement en 0.5 s.
+	-- - Chute (rebirth Cash=0, dépense) : on snap directement pour ne pas
+	--   afficher temporairement plus de cash que ce que le serveur dit.
+	local CASH_ANIM_DURATION = 0.5
+	local displayedCash = 0
+	local targetCash = 0
+	local animStartCash = 0
+	local animStartTime = 0
+	local animating = false
+
+	local function updateCashLabel()
+		coinLabel.Text = "$" .. formatNumber(displayedCash)
+	end
+
+	local function refreshCashTarget()
+		local cashVal = player:FindFirstChild("Cash")
+		if not cashVal then return end
+		local v = cashVal.Value
+		targetCash = v
+		-- Si la valeur baisse (rebirth, dépense), on snap pour rester honnête.
+		if v < displayedCash then
+			displayedCash = v
+			animating = false
+			updateCashLabel()
+			return
+		end
+		-- Sinon, on (re)démarre une anim de 0.5 s depuis la valeur actuelle.
+		if v ~= displayedCash then
+			animStartCash = displayedCash
+			animStartTime = os.clock()
+			animating = true
+		end
+	end
+
+	-- Init immédiate (avant que la boucle Heartbeat ne tourne).
+	do
 		local cashVal = player:FindFirstChild("Cash")
 		if cashVal then
-			coinLabel.Text = "$" .. formatNumber(cashVal.Value)
+			displayedCash = cashVal.Value
+			targetCash = cashVal.Value
+			updateCashLabel()
 		end
+	end
+
+	RunService.Heartbeat:Connect(function()
+		if not animating then return end
+		local elapsed = os.clock() - animStartTime
+		local t = elapsed / CASH_ANIM_DURATION
+		if t >= 1 then
+			displayedCash = targetCash
+			animating = false
+		else
+			displayedCash = animStartCash + (targetCash - animStartCash) * t
+		end
+		updateCashLabel()
+	end)
+
+	local function updateCashDisplay()
+		refreshCashTarget()
 	end
 
 	local function updateYeetDisplay()

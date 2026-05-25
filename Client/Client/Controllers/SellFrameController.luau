@@ -387,6 +387,10 @@ function SellFrameController:Start()
 		end
 
 		for _, view in ipairs(views) do
+			-- On sauvegarde la position de scroll avant de vider la liste,
+			-- pour éviter que le ScrollingFrame ne saute en haut à chaque vente.
+			local savedCanvasPos = view.scroll.CanvasPosition
+
 			clearScroll(view.scroll, view.template)
 
 			if #entries == 0 then
@@ -411,7 +415,28 @@ function SellFrameController:Start()
 				view.invValue.Text = "Inventory value: " .. formatCash(totalValue)
 			end
 
-			view.scroll.CanvasPosition = Vector2.new(0, 0)
+			-- Restaure la position de scroll. Si la liste a rétréci (vente du
+			-- dernier élément visible), on borne au max possible pour ne pas
+			-- laisser un offset au-delà du contenu.
+			if #entries == 0 then
+				view.scroll.CanvasPosition = Vector2.new(0, 0)
+			else
+				local scroll = view.scroll
+				-- Le layout met un frame à recalculer AbsoluteCanvasSize après
+				-- l'ajout des enfants. On applique la position immédiatement
+				-- (Roblox clampe seul) puis on re-clampe au prochain frame pour
+				-- gérer proprement le cas "liste rétrécie".
+				scroll.CanvasPosition = savedCanvasPos
+				task.defer(function()
+					if not scroll.Parent then return end
+					local maxY = math.max(0, scroll.AbsoluteCanvasSize.Y - scroll.AbsoluteWindowSize.Y)
+					local maxX = math.max(0, scroll.AbsoluteCanvasSize.X - scroll.AbsoluteWindowSize.X)
+					scroll.CanvasPosition = Vector2.new(
+						math.clamp(savedCanvasPos.X, 0, maxX),
+						math.clamp(savedCanvasPos.Y, 0, maxY)
+					)
+				end)
+			end
 		end
 	end
 

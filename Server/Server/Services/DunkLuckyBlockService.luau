@@ -176,6 +176,24 @@ end
 local WAVE_SHOWCASE_TIME  = 0.6   -- durée pendant laquelle la caméra reste sur la wave après montee
 local WAVE_TOUCH_RADIUS   = 6     -- distance horizontale en studs pour qu'un brainrot soit "touché"
 
+-- POLISH (player feedback) : tsunami instant-death safety buffer.
+-- Au moment où la wave commence à bouger (chaseStartTime), si le brainrot
+-- spawn dans une rareté proche / si la wave s'élance depuis une W-part
+-- adjacente, le hitbox de la wave peut chevaucher la position du brainrot
+-- dès la 1re frame -> mort instantanée sans aucune marge de réaction.
+--
+-- WAVE_TOUCHDOWN_GRACE : durée (s) après chaseStartTime pendant laquelle
+-- la collision wave/brainrot est désactivée. Le joueur a au minimum cette
+-- fenêtre pour s'écarter de la trajectoire.
+--
+-- WAVE_MIN_HORIZONTAL_DIST : distance horizontale (studs) minimale entre la
+-- position de la wave et celle du brainrot pour autoriser un kill. Filet de
+-- sécurité geometrique additionnel : si la wave est physiquement collée au
+-- brainrot dès la 1re frame du chase (overlap initial), on attend qu'elle
+-- s'éloigne d'abord, sinon le kill ne déclenche jamais sur cette frame.
+local WAVE_TOUCHDOWN_GRACE = 0.5
+local WAVE_MIN_HORIZONTAL_DIST = 4
+
 -- [userId] = true tant qu'une séquence est en cours pour ce joueur.
 local inSession = {}
 
@@ -1042,9 +1060,10 @@ local function runSequence(player, grade, fill)
 	end
 
 	-- 4) Spin : on cycle différents brainrots (en vrai, pas en silhouette) à
-	-- l'endroit d'atterrissage. Chaque itération on détruit l'ancien et on en
-	-- spawne un nouveau, tous tournant sur eux-mêmes.
-	local spinStart = os.clock()
+	-- l'endroit d'atterrissage. POLISH : depuis le fix anim 2 FPS, le cycling
+	-- visuel est 100% local au client (cf. DunkLuckyBlockController "SpinStarted").
+	-- Le serveur n'attend plus que SPIN_DURATION puis spawne le brainrot FINAL
+	-- en couleur à la position spinMount.
 
 	local spinMount = Instance.new("Part")
 	spinMount.Name = "DunkSpinMount"
@@ -1063,9 +1082,24 @@ local function runSequence(player, grade, fill)
 
 	-- Prévient le client que le spin commence : la caméra se placera devant
 	-- la spin pour que le joueur voie les brainrots de face.
+	--
+	-- POLISH (player feedback) : on envoie aussi la LISTE des noms de brainrots
+	-- du pool. Le client va orchestrer le cycling visuel des silhouettes
+	-- LOCALEMENT à 60Hz+ (pas de réplication = pas de stutter à 2 FPS comme
+	-- avant, où chaque clone.Parent = spinMount partait par le réseau).
+	-- Le serveur garde un currentDisplay non visible pour la détection /
+	-- compat, mais l'animation perçue est 100% client.
+	local poolNames = {}
+	for _, t in ipairs(pool) do
+		table.insert(poolNames, t.Name)
+	end
 	dunkSequenceEvent:FireClient(player, "SpinStarted", {
 		SpinMount = spinMount,
 		ImpactPosition = impactPos,
+		PoolNames = poolNames,
+		SpinDuration = SPIN_DURATION,
+		SwitchMin = SILHOUETTE_SWITCH_MIN,
+		SwitchMax = SILHOUETTE_SWITCH_MAX,
 	})
 
 	-- Attach l'OpeningVFX UNE SEULE FOIS au spinMount (persiste toute la durée
@@ -1135,36 +1169,16 @@ local function runSequence(player, grade, fill)
 		currentDisplay = clone
 	end
 
-	-- Les brainrots NE tournent PAS sur eux-mêmes pendant le roll : on les
-	-- affiche simplement en place, en noir, et on les remplace (cycle) à
-	-- intervalle rapide. showBrainrot() se charge déjà du bon placement
-	-- (orientation native + correction Y pour que les pieds touchent le sol).
-	local spinConn = nil
-
-	-- Cycling des brainrots affichés pendant le spin, en NOIR (silhouette).
-	local spinDone = false
-	task.spawn(function()
-		while not spinDone do
-			local elapsed = os.clock() - spinStart
-			local progress = math.clamp(elapsed / SPIN_DURATION, 0, 1)
-			-- Courbe exponentielle (^5) : le roll garde sa vitesse max très
-			-- longtemps, puis ralentit brutalement sur le dernier quart pour un
-			-- gros effet de suspense (style machine à sous).
-			local eased = progress ^ 5
-			local interval = SILHOUETTE_SWITCH_MIN + (SILHOUETTE_SWITCH_MAX - SILHOUETTE_SWITCH_MIN) * eased
-			local pick = pool[math.random(1, #pool)]
-			showBrainrot(pick, true) -- silhouette noire
-			-- Re-burst l'OpeningVFX à chaque switch pour que l'effet soit
-			-- TOUJOURS visible, pas seulement sur un brainrot aléatoire.
-			if spinVfxCtx then
-				triggerOpeningVFXEmit(spinVfxCtx)
-			end
-			task.wait(interval)
-		end
-	end)
-
+	-- POLISH (player feedback) : auparavant le serveur faisait l'animation
+	-- en spawnant/détruisant des Models inside spinMount à chaque switch.
+	-- Comme spinMount.Parent = Workspace, ces changements étaient répliqués
+	-- au client à la fréquence réseau (~20Hz max), donc le joueur voyait le
+	-- cycling à 2 FPS. Désormais l'animation pendant le spin est 100% côté
+	-- client (cf. DunkLuckyBlockController "SpinStarted" : utilise PoolNames
+	-- pour cloner les templates LOCALEMENT et swap à 60+Hz). Le serveur ne
+	-- repère plus les silhouettes ici ; il se contente d'attendre la fin du
+	-- spin avant d'instancier le brainrot FINAL en couleur.
 	task.wait(SPIN_DURATION)
-	spinDone = true
 
 	-- Affichage final du VRAI brainrot choisi (couleur normale) quelques frames.
 	-- C'est LE SEUL brainrot qui apparait en couleur pendant le roll ; tous
@@ -1223,9 +1237,6 @@ local function runSequence(player, grade, fill)
 	-- Pause plus longue pour laisser le joueur voir le brainrot + son billboard.
 	task.wait(1.2)
 
-	if spinConn then spinConn:Disconnect(); spinConn = nil end
-
-	-- Cleanup du VFX spin (l'attachment sera détruit quand le spinMount l'est).
 	if spinVfxCtx and spinVfxCtx.attachment and spinVfxCtx.attachment.Parent then
 		spinVfxCtx.attachment:Destroy()
 	end
@@ -1467,6 +1478,10 @@ local function runSequence(player, grade, fill)
 		-- vitesse WAVE_CHASE_SPEED) et vérifie si le brainrot est dans l'OBB
 		-- (oriented bounding box) de la wave.
 		local chaseStartTime = os.clock() + WAVE_CHASE_START_DELAY
+		-- POLISH : grace period au démarrage où la wave ne peut PAS tuer.
+		-- Évite la mort instantanée pile au touchdown si la wave spawn déjà
+		-- au contact de la position du brainrot.
+		local hitDetectionStartTime = chaseStartTime + WAVE_TOUCHDOWN_GRACE
 		local chaseStartPos = waveMetrics.EndPos
 		local chaseSpeed = getWaveChaseSpeed(waveRarity)
 		-- Hitbox de la wave RESSERÉE par rapport au bounding box du modèle.
@@ -1490,13 +1505,19 @@ local function runSequence(player, grade, fill)
 				if not trackHRP then return end
 			end
 
-			local elapsed = os.clock() - chaseStartTime
+			local now = os.clock()
+			local elapsed = now - chaseStartTime
 			if elapsed < 0 then return end -- délai de démarrage : wave encore immobile
 			local travel = chaseSpeed * elapsed
 			local wavePos = chaseStartPos + fixedDir * travel
 			if fixedDir.X > 0 and wavePos.X > WAVE_STOP_X then
 				wavePos = Vector3.new(WAVE_STOP_X, wavePos.Y, wavePos.Z)
 			end
+
+			-- POLISH : grace period au touchdown. Tant qu'on n'a pas dépassé
+			-- hitDetectionStartTime, la wave est invisible aux yeux du hit-test.
+			-- Donne au joueur une fenêtre garantie pour réagir.
+			if now < hitDetectionStartTime then return end
 
 			local toBr = trackHRP.Position - wavePos
 			local toBrHoriz = Vector3.new(toBr.X, 0, toBr.Z)
@@ -1505,6 +1526,12 @@ local function runSequence(player, grade, fill)
 			local projFwd   = toBrHoriz:Dot(fixedDir)
 
 			if projFwd > halfZ then return end
+
+			-- Filet supplémentaire : refuse le kill si l'overlap géométrique est
+			-- TROP serré (le brainrot est quasi-collé au centre de la wave dès
+			-- la 1re frame, ce qui révèle un touchdown defectueux). On laisse la
+			-- wave s'éloigner suffisamment avant d'autoriser le hit.
+			if toBrHoriz.Magnitude < WAVE_MIN_HORIZONTAL_DIST then return end
 
 			if math.abs(projRight) <= halfX and math.abs(projFwd) <= halfZ then
 				waveCaughtBrainrot = true
