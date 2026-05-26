@@ -1249,32 +1249,36 @@ function SatchelController:SetInventoryOpen(open)
 end
 
 -- ===== Bouton TopbarPlus =====
+--
+-- Création robuste du bouton, faite dans un task.spawn pour ne pas bloquer
+-- :Start(). On yield sur les pré-conditions critiques avant tout appel à
+-- TopbarPlus pour éviter le bug intermittent où le bouton ne s'affichait pas
+-- au join (Icon.new() construit avant que le TopBar core de Roblox ne soit
+-- prêt → le ScreenGui de TopbarPlus est créé mais jamais positionné dans le
+-- topbar). En plus du yield, on entoure la construction d'un retry pcall pour
+-- couvrir les cas extrêmes où TopbarPlus lève une erreur transitoire pendant
+-- son init, et on monte un petit watchdog qui recrée l'icône si son instance
+-- sous-jacente venait à disparaître (respawn, GUI reset par un autre code).
 
-local function createTopbarIcon()
-	local ok, moduleOrErr = pcall(function()
-		return require(ReplicatedStorage:WaitForChild("Icon", 10))
-	end)
-	if not ok or not moduleOrErr then
-		warn("[SatchelController] Impossible de charger TopbarPlus (ReplicatedStorage.Icon).")
-		return
-	end
-	IconModule = moduleOrErr
+local CREATE_RETRY_COUNT = 5
+local CREATE_RETRY_DELAY = 0.5
 
-	topbarIcon = IconModule.new()
-	topbarIcon:setName("InventoryIcon")
-	topbarIcon:setImage(INVENTORY_ICON_IMAGE)
-	topbarIcon:setCaption("Inventory")
-	topbarIcon:setOrder(-5)
-	topbarIcon:align("Left")
-	topbarIcon:bindToggleKey(Enum.KeyCode.B)
+local function buildIcon()
+	local icon = IconModule.new()
+	icon:setName("InventoryIcon")
+	icon:setImage(INVENTORY_ICON_IMAGE)
+	icon:setCaption("Inventory")
+	icon:setOrder(-5)
+	icon:align("Left")
+	icon:bindToggleKey(Enum.KeyCode.B)
 
-	topbarIcon.selected:Connect(function()
+	icon.selected:Connect(function()
 		-- Bloque l'ouverture via l'icône topbar (clic ou raccourci B) tant que
 		-- le joueur est sous forme brainrot. On force la désélection visuelle
 		-- pour que l'icône ne reste pas "appuyée".
 		if isPlayerBrainrot() then
-			if topbarIcon.isSelected then
-				topbarIcon:deselect("Inventory", topbarIcon)
+			if icon.isSelected then
+				icon:deselect("Inventory", icon)
 			end
 			return
 		end
@@ -1282,9 +1286,68 @@ local function createTopbarIcon()
 			SatchelController:SetInventoryOpen(true)
 		end
 	end)
-	topbarIcon.deselected:Connect(function()
+	icon.deselected:Connect(function()
 		if inventoryOpen then
 			SatchelController:SetInventoryOpen(false)
+		end
+	end)
+
+	return icon
+end
+
+local function createTopbarIcon()
+	task.spawn(function()
+		-- 1) Attendre que la game soit chargée. C'est CRITIQUE : TopbarPlus se
+		--    base sur les CoreScripts du topbar Roblox pour positionner ses
+		--    icônes ; les construire avant game.Loaded c'est jouer à la roulette.
+		if not game:IsLoaded() then
+			game.Loaded:Wait()
+		end
+
+		-- 2) S'assurer que PlayerGui existe (TopbarPlus y parente son ScreenGui).
+		if not player:FindFirstChildOfClass("PlayerGui") then
+			player:WaitForChild("PlayerGui")
+		end
+
+		-- 3) Charger le module TopbarPlus. Le WaitForChild a un timeout long
+		--    pour absorber les chargements lents (mobile / connexion lente).
+		local ok, moduleOrErr = pcall(function()
+			return require(ReplicatedStorage:WaitForChild("Icon", 10))
+		end)
+		if not ok or not moduleOrErr then
+			warn("[SatchelController] Impossible de charger TopbarPlus (ReplicatedStorage.Icon).")
+			return
+		end
+		IconModule = moduleOrErr
+
+		-- 4) Tentatives de construction avec retry. Couvre les cas où le
+		--    TopBar core est encore en pleine init au moment du 1er appel.
+		local lastErr
+		for attempt = 1, CREATE_RETRY_COUNT do
+			local okBuild, result = pcall(buildIcon)
+			if okBuild and result then
+				topbarIcon = result
+				lastErr = nil
+				break
+			end
+			lastErr = result
+			warn(string.format(
+				"[SatchelController] Tentative %d/%d de création du bouton topbar a échoué : %s",
+				attempt, CREATE_RETRY_COUNT, tostring(lastErr)
+			))
+			task.wait(CREATE_RETRY_DELAY)
+		end
+
+		if not topbarIcon then
+			warn("[SatchelController] Échec définitif de la création du bouton topbar : " .. tostring(lastErr))
+			return
+		end
+
+		-- Si pendant la construction le state "brainrot" est déjà actif
+		-- (joueur arrivé alors qu'une session brainrot tournait), on cache
+		-- immédiatement l'icône pour rester cohérent avec applyBrainrotState.
+		if isPlayerBrainrot() then
+			pcall(function() topbarIcon:setEnabled(false) end)
 		end
 	end)
 end
