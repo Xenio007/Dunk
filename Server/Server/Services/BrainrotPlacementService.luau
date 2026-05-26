@@ -1522,6 +1522,28 @@ local function resetPlot(plotModel)
 			end
 		end
 	end
+
+	-- Wipe the entire UpgradeSigns folder. The Sign / MaxSign Parts live in
+	-- plotModel.UpgradeSigns (a sibling of Floors), so they are NOT children
+	-- of any "Slots" folder and the loop above cannot reach them through the
+	-- slot iteration. They also survive GameService.releasePlot, which only
+	-- destroys plotModel.Floors. When the slots on elevated floors are
+	-- destroyed by releasePlot, their _UpgradeSignRef ObjectValue dies with
+	-- them and we lose the slot → sign link, so refreshUpgradeSign cannot
+	-- hide those signs anymore. Result without this cleanup : the upgrade
+	-- signs of elevated slots stay floating in the air after the owner
+	-- leaves. Destroying every sign here is unconditional and order-
+	-- independent (works whether releasePlot ran before or after this
+	-- function). ensureUpgradeSignForSlot rebuilds the signs from scratch
+	-- when the next owner's slots are initialised (walkAndInit for the
+	-- static slots + DescendantAdded watcher for dynamically purchased
+	-- floor slots).
+	local signFolder = plotModel:FindFirstChild(UPGRADE_SIGN_FOLDER)
+	if signFolder then
+		for _, sign in ipairs(signFolder:GetChildren()) do
+			sign:Destroy()
+		end
+	end
 end
 
 -- ===== PLAYER LIFECYCLE =====
