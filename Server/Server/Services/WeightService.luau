@@ -2,12 +2,25 @@
 	WeightService
 	Gère l'achat, l'équipement et l'usage des poids. La persistence est
 	déléguée à DataService (un seul DataStore partagé pour tout le joueur).
+
+	 Attachement du poids — philosophie zéro-latence :
+	 Le Handle du Tool est attaché à la RightHand du personnage via le
+	 Motor6D RightGrip natif, créé automatiquement par Roblox au moment
+	 de Tool.Equipped (parce que RequiresHandle=true). C'est une jointure
+	 physique simulée localement par chaque client → 0 ms de latence pour
+	 le propriétaire ET pour les spectateurs (la jointure est répliquée
+	 par le pipeline standard Tool/Motor6D).
+
+	 Conséquence : on n'ANCRE PAS le Handle, on n'écrit PAS Handle.CFrame
+	 dans aucune boucle, et on ne détruit PAS le RightGrip. tool.Grip
+	 définit l'offset du Handle par rapport à la main droite ; l'animation
+	 de lift bouge les deux bras de manière synchronisée pour que la prise
+	 à deux mains soit visuellement correcte.
 ]]
 
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
@@ -26,7 +39,6 @@ local buyWeightRobuxEvent
 local equipWeightEvent
 local weightDataEvent
 local addPowerEvent
-local handleCFrameEvent
 local DataService
 
 -- Anti-spam lifting
@@ -43,26 +55,9 @@ local LENGTH_WAIT_TIMEOUT = 2.0
 --     track = AnimationTrack en cours,
 --     toolName = string,
 --     sessionToken = number,  -- invalidé quand on équipe / déséquipe
---     followConn = RBXScriptConnection,  -- Heartbeat qui place la barre entre les mains
---     handle = BasePart,                  -- ref au Handle pour cleanup
 -- }
+-- Plus de `followConn` ni de `handle` : aucun loop ne touche au Handle.
 local liftSessions = {}
-
--- Liste des poids qui sont des plaques/blocs (orientation différente). Pour
--- les autres (barres / barbell), on applique une rotation 90° autour de Y
--- pour aligner l'axe long du mesh avec l'axe latéral entre les deux mains.
-local PLATE_NAMES = {
-	["Stone Block"] = true,
-	["Copper Plate"] = true,
-	["Iron Plate"] = true,
-}
-
--- NB : on ne touche PLUS au Handle ni au RightGrip Motor6D natif côté serveur.
--- Toute tentative d'ancrer le Handle ou de détruire le RightGrip créait des
--- conflits physiques (character invisible, main effacée, brainrot qui tombe
--- au sol). Le placement de la barre est géré 100% côté client via RenderStepped
--- (cf. WeightAnimationController) ; le serveur se contente de jouer l'animation
--- de lift et de gérer les cycles de gain de Power.
 
 -- Anti-spam achat (cash) : empêche un joueur d'envoyer 100 buys par seconde
 -- ce qui spammerait giveWeightTool et noyerait la réplication client
@@ -102,94 +97,8 @@ local function stopLiftSessionFor(player, reason)
 	if session.track then
 		pcall(function() session.track:Stop(0) end)
 	end
-	if session.followConn then
-		pcall(function() session.followConn:Disconnect() end)
-		session.followConn = nil
-	end
-	-- Désancre le Handle pour qu'il puisse retourner au backpack proprement.
-	if session.handle and session.handle.Parent then
-		pcall(function() session.handle.Anchored = false end)
-	end
-	session.handle = nil
 	liftSessions[player.UserId] = nil
 	_ = reason
-end
-
--- Place le Handle pile entre LeftHand et RightHand chaque frame côté serveur.
--- Ainsi tous les joueurs (et pas seulement le local) voient la barre tenue
--- correctement à deux mains, suivant le mouvement de l'animation de lift.
-local function startServerHandleFollow(player, tool)
-	local character = tool.Parent
-	if not character then return nil end
-	local handle = tool:FindFirstChild("Handle")
-	if not handle then return nil end
-
-	local leftHand = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-	local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-	if not (leftHand and rightHand) then return nil end
-
-	-- Détruit le Motor6D RightGrip natif créé par Roblox sur Equipped pour
-	-- qu'il n'essaie plus d'attacher rigidement le Handle à la main droite
-	-- (sinon conflit avec notre ancrage + CFrame écrit chaque frame).
-	local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-	if rh then
-		local grip = rh:FindFirstChild("RightGrip")
-		if grip then pcall(function() grip:Destroy() end) end
-	end
-
-	-- Ancre côté serveur : ça réplique à TOUS les clients, donc tout le monde
-	-- voit l'ancrage et notre CFrame qui suit les mains.
-	handle.Anchored = true
-
-	local isPlate = PLATE_NAMES[tool.Name] == true
-
-	local function placeNow()
-		if not handle.Parent or not character.Parent then return end
-		local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-		local rh2 = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-		if not lh or not rh2 then return end
-		local midCFrame = lh.CFrame:Lerp(rh2.CFrame, 0.5)
-		local direction = (rh2.Position - lh.Position)
-		if direction.Magnitude > 0.01 then
-			direction = direction.Unit
-			local up = midCFrame.UpVector
-			local look = direction:Cross(up).Unit
-			local right = up:Cross(look).Unit
-			local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
-			if isPlate then
-				-- Plaque/bloc : on la fait pivoter de 90° autour de Y pour que sa
-				-- face plate soit perpendiculaire au regard du joueur (face avant
-				-- visible face caméra), au lieu de pointer dans l'axe forward
-				-- ce qui faisait dépasser le bloc du torse.
-				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
-			else
-				handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
-			end
-		else
-			handle.CFrame = midCFrame
-		end
-	end
-
-	-- Placement initial immédiat pour éviter le "flash" 1 frame à la position
-	-- du Tool.Grip natif avant que Heartbeat ne replace.
-	placeNow()
-
-	local conn
-	conn = RunService.Heartbeat:Connect(function()
-		if not handle.Parent or not character.Parent then
-			if conn then conn:Disconnect() conn = nil end
-			return
-		end
-		-- Si le tool a été déséquipé, on arrête. Le tool dans le backpack n'a
-		-- pas le character pour parent, donc cette condition couvre le cas.
-		if tool.Parent ~= character then
-			if conn then conn:Disconnect() conn = nil end
-			return
-		end
-		placeNow()
-	end)
-
-	return conn, handle
 end
 
 local function startLiftSessionFor(player, tool)
@@ -231,13 +140,12 @@ local function startLiftSessionFor(player, tool)
 	liftSessions[player.UserId] = session
 	local mySession = session.sessionToken
 
-	-- Lance le suivi serveur du Handle entre les deux mains. Réplique à tous
-	-- les clients, donc les autres joueurs voient aussi la barre bien centrée.
-	local followConn, handle = startServerHandleFollow(player, tool)
-	session.followConn = followConn
-	session.handle = handle
+	-- Pas de boucle de placement du Handle ici. Le RightGrip Motor6D natif
+	-- (créé par Roblox quand Tool.Equipped fire) attache déjà le Handle à
+	-- la RightHand avec zéro latence, et l'animation de lift fait bouger
+	-- les deux bras ensemble. Tout est répliqué nativement.
 
-	-- Boucle de gain de Power aliée sur la durée réelle de la track.
+	-- Boucle de gain de Power alignée sur la durée réelle de la track.
 	task.spawn(function()
 		local waited = 0
 		while track.Length <= 0 and waited < LENGTH_WAIT_TIMEOUT and liftSessions[player.UserId] == session and session.sessionToken == mySession do
@@ -349,9 +257,9 @@ local function giveWeightTool(player, weightName)
 		task.wait(0.25)
 	end
 
-	-- Désancre tous les Handles avant Destroy : si un ancien client a laissé
-	-- un Handle ancré (anciennes versions), le détruire en état ancré +
-	-- Motor6D actif crashait. On force Anchored=false serveur-side d'abord.
+	-- Filet de sécurité : si un Tool laissé par une ancienne version du code
+	-- avait des parts ancrées, on les désancre avant Destroy (un Handle ancré
+	-- avec un Motor6D actif peut produire des états physiques invalides).
 	local function safeUnanchor(tool)
 		for _, d in ipairs(tool:GetDescendants()) do
 			if d:IsA("BasePart") then
@@ -384,13 +292,38 @@ local function giveWeightTool(player, weightName)
 	tool.Name = weightName
 	tool.CanBeDropped = false
 	tool.RequiresHandle = true
-	-- Tool.Grip : positionne le Handle relatif à la main droite. On décale
-	-- d'~1 stud sur l'axe X (latéral, positif = vers la main gauche du perso)
-	-- pour que le CENTRE de la barre tombe au milieu des deux mains plutôt
-	-- que sur la main droite. Pas d'offset Z = la barre reste collée contre
-	-- le corps. La rotation 90° autour de Y aligne l'axe long du mesh
-	-- (Z local) avec l'axe latéral, donc la barre est horizontale.
-	tool.Grip = CFrame.new(1, 0, 0) * CFrame.Angles(0, math.rad(90), 0)
+	-- Tool.Grip : positionne le Handle relatif à la main droite. C'est ce
+	-- CFrame qui devient le C0 du Motor6D RightGrip natif que Roblox crée
+	-- automatiquement à l'équipement → la barre suit la main avec zéro
+	-- latence et zéro replication overhead, simulée localement sur chaque
+	-- client par le moteur physique.
+	--
+	-- ORDRE DES OPÉRATIONS (important !) :
+	-- On rotate D'ABORD, puis on translate dans la base déjà tournée :
+	--   Grip = R(90° Y) * T(+X)
+	-- L'ancien ordre `T(+X) * R(90° Y)` faisait que le +X de translation
+	-- était ensuite tourné vers +Z (avant) par la rotation → la barre
+	-- restait collée sur la main droite au lieu d'être décalée latéralement.
+	--
+	-- VALEURS :
+	--   Rotation 90° autour de Y → aligne l'axe long du mesh (Z local) avec
+	--                              l'axe latéral entre les deux mains, donc
+	--                              la barre est horizontale.
+	--   Translation +X = HALF_HAND_DISTANCE → décale le Handle vers la main
+	--                                         gauche d'exactement la moitié
+	--                                         de l'écart inter-mains, donc
+	--                                         le centre du Handle tombe
+	--                                         pile au milieu entre les deux
+	--                                         mains (vue de face : sur l'axe
+	--                                         vertical du torse).
+	--
+	-- 1.472 = moitié de la distance main-à-main d'un rig R15 par défaut
+	-- (mesurée empiriquement, ~2.944 studs entre les centres des mains).
+	-- Si tu modifies les proportions (BodyWidthScale != 1), tu peux ajuster
+	-- ce nombre proportionnellement, mais 1.472 marche pour la plupart des
+	-- avatars standards.
+	local HALF_HAND_DISTANCE = 1.472
+	tool.Grip = CFrame.Angles(0, math.rad(90), 0) * CFrame.new(HALF_HAND_DISTANCE, 0, 0)
 
 	local modelClone = model:Clone()
 	local primaryPart = modelClone:FindFirstChildWhichIsA("BasePart")
@@ -692,17 +625,14 @@ function WeightService:Init()
 	weightDataEvent = RemotesAPI.GetEvent("WeightDataEvent")
 	addPowerEvent = RemotesAPI.GetEvent("AddPowerEvent")
 
-	-- UnreliableRemoteEvent pour le streaming haute-fréquence du CFrame du
-	-- Handle. Ne ré-essaie pas en cas de paquet perdu (= moins de buffering)
-	-- et a une latence plus basse qu'un RemoteEvent classique. Parfait pour
-	-- du tracking continu où un paquet raté est immédiatement remplacé par
-	-- le suivant.
+	-- Cleanup : l'ancien UnreliableRemoteEvent WeightHandleCFrameEvent servait
+	-- à streamer le CFrame du Handle frame par frame. C'est précisément ce
+	-- système qui causait la latence : on l'élimine et on le supprime de
+	-- l'arbre s'il existe encore (résidu d'une ancienne version).
 	local remotesFolder = RemotesAPI.GetFolder()
-	handleCFrameEvent = remotesFolder:FindFirstChild("WeightHandleCFrameEvent")
-	if not handleCFrameEvent then
-		handleCFrameEvent = Instance.new("UnreliableRemoteEvent")
-		handleCFrameEvent.Name = "WeightHandleCFrameEvent"
-		handleCFrameEvent.Parent = remotesFolder
+	local legacyHandleEvent = remotesFolder:FindFirstChild("WeightHandleCFrameEvent")
+	if legacyHandleEvent then
+		pcall(function() legacyHandleEvent:Destroy() end)
 	end
 end
 

@@ -1,20 +1,23 @@
 --[[
 	WeightAnimationController
 	Quand le joueur équipe un weight tool :
-	1. Freeze le joueur (pas de mouvement ni de saut)
-	2. Place le weight entre les mains (suivi RenderStepped)
-	3. Joue le son de cycle quand le serveur signale un AddPower
+	1. Freeze le joueur (pas de mouvement ni de saut) pour que la pose de
+	   lift soit propre et que la caméra ne dérive pas pendant l'animation.
+	2. Joue le son de cycle quand le serveur signale un AddPower.
 	Quand le joueur déséquipe le tool, tout revient à la normale.
 
+	Attachement du Handle : il n'y a aucun code de placement côté client.
+	Le Handle est attaché à la RightHand par le Motor6D RightGrip natif que
+	Roblox crée à Tool.Equipped. Cette jointure est simulée localement par
+	chaque client (latence zéro pour le propriétaire ET pour les spectateurs)
+	et répliquée par le pipeline Tool standard. tool.Grip définit l'offset
+	du Handle relatif à la main droite.
+
 	Note : la lecture de l'animation de lift et le calcul des cycles de gain
-	de Power sont maintenant 100% côté SERVEUR (WeightService). Ce controller
-	ne joue PLUS l'animation localement et n'envoie PLUS le AddPowerEvent au
-	serveur. Le serveur déclenche addPowerEvent:FireClient à chaque cycle, ce
-	qui fait jouer le son ici. Conséquences positives :
-	  - Tous les autres joueurs voient l'anim de lift correctement.
-	  - Le tempo des cycles est contrôlé par le serveur (anti-cheat).
-	  - Plus de risque de crash lié à la destruction concurrente du Tool /
-	    Animation pendant qu'un AnimationTrack tournait côté client.
+	de Power sont 100% côté SERVEUR (WeightService). Ce controller ne joue
+	PLUS l'animation localement et n'envoie PLUS le AddPowerEvent au serveur.
+	Le serveur déclenche addPowerEvent:FireClient à chaque cycle, ce qui
+	fait jouer le son ici.
 ]]
 
 local Players = game:GetService("Players")
@@ -24,11 +27,6 @@ local SoundService = game:GetService("SoundService")
 
 local Loader = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Loader"))
 local RemotesAPI = require(ReplicatedStorage.Shared.RemotesAPI)
-
--- UnreliableRemoteEvent pour le streaming haute-fréquence du CFrame du Handle.
--- Latence plus basse + pas de re-transmission qu'un RemoteEvent classique.
-local remotesFolder = ReplicatedStorage:WaitForChild("Remotes")
-local handleCFrameEvent = remotesFolder:WaitForChild("WeightHandleCFrameEvent")
 
 local WeightAnimationController = Loader.CreateController({
 	Name = "WeightAnimationController",
@@ -58,23 +56,9 @@ function WeightAnimationController:Start()
 	local WeightsConfig = require(ReplicatedStorage:WaitForChild("WeightsConfig"))
 	local addPowerEvent = RemotesAPI.GetEvent("AddPowerEvent")
 
-	local ANIM_BARBELL = WeightsConfig.ANIM_BARBELL
-
-	-- Liste des poids qui sont des plaques/blocs (orientation différente :
-	-- pas de rotation 90° autour de Y dans startBarbellFollow). Tous les autres
-	-- sont des barres et reçoivent la rotation pour être horizontales.
-	local PLATE_NAMES = {
-		["Stone Block"] = true,
-		["Copper Plate"] = true,
-		["Iron Plate"] = true,
-	}
-
 	-- État par session. Tout est réinitialisé au respawn.
 	local currentToolName = nil
 	local freezeConnection = nil
-	local currentWeld = nil
-	local barbellHandle = nil      -- Handle de la barbell à tracker chaque frame
-	local barbellFollowConn = nil  -- Connexion RunService pour le suivi temps réel
 	local lastEquipTime = 0 -- clock du dernier setupTool réussi, pour le cooldown
 
 	-- Connexions par character (CharacterAdded réinitialise cette liste). Évite
@@ -86,125 +70,6 @@ function WeightAnimationController:Start()
 			if c.Connected then c:Disconnect() end
 		end
 		table.clear(characterConns)
-	end
-
-	local function removeRightGrip(character)
-		local rightHand = character:FindFirstChild("RightHand")
-		if rightHand then
-			local grip = rightHand:FindFirstChild("RightGrip")
-			if grip then grip:Destroy() end
-		end
-		local rightArm = character:FindFirstChild("Right Arm")
-		if rightArm then
-			local grip = rightArm:FindFirstChild("RightGrip")
-			if grip then grip:Destroy() end
-		end
-	end
-
-	local function stopBarbellFollow()
-		if barbellFollowConn then
-			barbellFollowConn:Disconnect()
-			barbellFollowConn = nil
-		end
-		-- Sécurité historique : si une ancienne version du code avait ancré le
-		-- Handle, on s'assure qu'il est désancré. La nouvelle implémentation
-		-- n'ancre PLUS rien (cf. startBarbellFollow ci-dessous), pour éviter
-		-- la contrainte Motor6D RightGrip + Handle ancré qui crashait le client.
-		if barbellHandle and barbellHandle.Parent then
-			pcall(function() barbellHandle.Anchored = false end)
-		end
-		barbellHandle = nil
-	end
-
-	-- Positionne un weight entre les deux mains chaque frame. Si `isPlate` est
-	-- true, le weight est orienté comme un disque/plaque ; sinon comme une barre.
-	local function startBarbellFollow(handle, character, isPlate)
-		stopBarbellFollow()
-		if not handle or not character then return end
-
-		local leftHand = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-		local rightHand = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-		if not (leftHand and rightHand) then return end
-
-		-- On mémorise le handle pour pouvoir le désancrer dans stopBarbellFollow
-		barbellHandle = handle
-		
-		-- On l'ancre LOCALEMENT pour qu'il suive précisément sans être soumis à la gravité
-		-- et sans interférer avec la physique du personnage.
-		handle.Anchored = true
-
-		local function placeNow()
-			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-			local rh = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-			if not lh or not rh then return end
-			local midCFrame = lh.CFrame:Lerp(rh.CFrame, 0.5)
-			local direction = (rh.Position - lh.Position)
-			if direction.Magnitude > 0.01 then
-				direction = direction.Unit
-				local up = midCFrame.UpVector
-				local look = direction:Cross(up).Unit
-				local right = up:Cross(look).Unit
-				local targetCFrame = CFrame.fromMatrix(midCFrame.Position, right, up)
-				if isPlate then
-					handle.CFrame = targetCFrame
-				else
-					handle.CFrame = targetCFrame * CFrame.Angles(0, math.rad(90), 0)
-				end
-			else
-				handle.CFrame = midCFrame
-			end
-		end
-
-		-- Placement initial immédiat : sans ça la barre apparait à la position
-		-- Tool.Grip natif (main droite seule) pendant 1 frame avant que le
-		-- RenderStepped ne la replace.
-		placeNow()
-
-		barbellFollowConn = RunService.RenderStepped:Connect(function()
-			if not (handle and handle.Parent) or not (character and character.Parent) then
-				stopBarbellFollow()
-				return
-			end
-			placeNow()
-		end)
-	end
-
-	-- ANCIENNE LOGIQUE supprimée : ancrer le Handle + réécrire son CFrame chaque
-	-- frame entrait en conflit avec le Motor6D RightGrip créé automatiquement
-	-- par Roblox à l'équipement, ce qui crashait le solveur physique du client.
-
-	local function weldWeightToShoulders(tool, character)
-		local handle = tool:FindFirstChild("Handle")
-		if not handle then return end
-
-		-- Pose un WeldConstraint LeftHand <-> Handle après un petit délai pour
-		-- que la pose de lift ait positionné les bras correctement avant que
-		-- le weld ne fige la position relative. Pas d'ancrage du Handle = pas
-		-- de conflit avec le Motor6D RightGrip natif (donc plus de main toupie).
-		-- Le RightGrip natif tient la main droite, notre weld tient la gauche :
-		-- prise à deux mains visible localement et répliquée (WeldConstraint
-		-- est répliqué par défaut, donc tous les joueurs voient le même résultat).
-		task.delay(0.3, function()
-			if not tool.Parent or tool.Parent ~= character then return end
-			if handle:FindFirstChild("WeightLeftHandWeld") then return end
-
-			local lh = character:FindFirstChild("LeftHand") or character:FindFirstChild("Left Arm")
-			if not lh then return end
-
-			local weld = Instance.new("WeldConstraint")
-			weld.Name = "WeightLeftHandWeld"
-			weld.Part0 = lh
-			weld.Part1 = handle
-			weld.Parent = handle
-		end)
-	end
-
-	local function removeWeightWeld()
-		stopBarbellFollow()
-		if currentWeld then
-			pcall(function() currentWeld:Destroy() end)
-			currentWeld = nil
-		end
 	end
 
 	local function freezePlayer(humanoid)
@@ -280,13 +145,6 @@ function WeightAnimationController:Start()
 
 	local function cleanup(humanoid)
 		currentToolName = nil
-		removeWeightWeld()
-		-- Défense en profondeur : assure que `barbellHandle` est bien désancré
-		-- même si removeWeightWeld n'a pas tout nettoyé.
-		if barbellHandle and barbellHandle.Parent then
-			pcall(function() barbellHandle.Anchored = false end)
-			barbellHandle = nil
-		end
 		if humanoid then
 			unfreezePlayer(humanoid)
 		end
@@ -318,20 +176,11 @@ function WeightAnimationController:Start()
 		local character = humanoid.Parent
 		if not character then return end
 
-		-- Freeze IMMEDIATEMENT, avant le task.wait. Comme ça le perso ne peut
-		-- plus bouger ni glisser pendant la frame d'attente.
+		-- Freeze le perso pour que la pose de lift soit propre. Le Handle est
+		-- déjà attaché à la main droite par le Motor6D RightGrip natif que Roblox
+		-- vient de créer pour ce Tool : aucun travail de placement côté client,
+		-- aucune latence, et réplication parfaite à tous les autres joueurs.
 		freezePlayer(humanoid)
-
-		task.wait() -- laisse Roblox finaliser l'ajout du tool
-		if not tool.Parent or tool.Parent ~= character then
-			unfreezePlayer(humanoid)
-			return
-		end
-
-		-- Le SERVEUR ancre + place le Handle entre les deux mains chaque frame.
-		-- C'est répliqué à tous les clients (joueur local + spectateurs), donc
-		-- tout le monde voit la barre bien centrée à deux mains. On ne fait
-		-- plus rien côté client pour le placement.
 	end
 
 	local function onCharacterAdded(character)
