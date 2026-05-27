@@ -1348,8 +1348,12 @@ local function createTopbarIcon()
 		-- Si pendant la construction le state "brainrot" est déjà actif
 		-- (joueur arrivé alors qu'une session brainrot tournait), on cache
 		-- immédiatement l'icône pour rester cohérent avec applyBrainrotState.
+		-- (Disabled per design request) On NE cache PLUS l'icône TopBar du
+		-- satchel pendant la phase brainrot / wave. L'icône d'inventaire reste
+		-- visible en permanence à l'écran pour que le joueur garde accès
+		-- à son inventaire pendant toute la séquence Dunk Lucky Block.
 		if isPlayerBrainrot() then
-			pcall(function() topbarIcon:setEnabled(false) end)
+			-- pcall(function() topbarIcon:setEnabled(false) end)
 		end
 	end)
 end
@@ -1502,17 +1506,22 @@ function SatchelController:Start()
 			end
 			if inventoryGui then inventoryGui.Enabled = false end
 			if hotbarGui then hotbarGui.Enabled = false end
-			-- Cache aussi l'icône topbar (sac à dos en haut à gauche). Sans ça,
-			-- l'icône reste cliquable et visible même quand la hotbar est cachée.
+			-- (Disabled per design request) On NE cache PLUS l'icône TopBar :
+			-- elle doit rester visible pendant toute la séquence Dunk / Wave
+			-- pour que le joueur ne perde jamais l'accès à son inventaire.
+			-- On garde uniquement le deselect (sinon l'icône reste "appuyée").
 			if topbarIcon then
 				if topbarIcon.isSelected then
 					pcall(function() topbarIcon:deselect("Inventory", topbarIcon) end)
 				end
-				pcall(function() topbarIcon:setEnabled(false) end)
+				-- pcall(function() topbarIcon:setEnabled(false) end)
 			end
 		else
-			-- Réaffiche la hotbar et l'icône topbar uniquement si aucun autre
-			-- système ne demande qu'elles restent cachées (KickZone, etc.).
+			-- Réaffiche la hotbar uniquement si aucun autre système ne demande
+			-- qu'elle reste cachée (KickZone, etc.). L'icône TopBar n'a plus
+			-- besoin d'être réactivée ici puisqu'elle n'est plus jamais désactivée
+			-- (cf. branche du dessus), mais on laisse l'appel défensif au cas où
+			-- un autre système l'aurait désactivée.
 			if not _G.SatchelEquipBlocked then
 				if hotbarGui then hotbarGui.Enabled = true end
 				if topbarIcon then
