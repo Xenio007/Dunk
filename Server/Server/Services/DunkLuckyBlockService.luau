@@ -100,6 +100,7 @@ local BLOCKPART_COLLISION_GROUP = "DunkBlockPart"
 
 local dunkRequestEvent
 local dunkSequenceEvent
+local setCustomPowerEvent
 local brainrotsFolder
 local luckyBlocksFolder
 local wavesFolder
@@ -300,12 +301,20 @@ local GRADE_WEIGHT = {
 	BAD       = 0.00,
 }
 
+-- [userId] = number. Puissance custom choisie par le joueur via le slider
+-- SetKickPower (UI client). Le serveur clamp cette valeur dans [0, YeetPower]
+-- au moment de l'utiliser, donc un exploiteur ne peut pas tirer plus loin que
+-- ce qu'il a réellement en YeetPower.
+local customKickPower = {}
+
 local function getPlayerPower(player)
 	local yp = player:FindFirstChild("YeetPower")
-	if yp and yp:IsA("NumberValue") then
-		return math.max(0, yp.Value)
+	local maxP = (yp and yp:IsA("NumberValue")) and math.max(0, yp.Value) or 10
+	local custom = customKickPower[player.UserId]
+	if typeof(custom) == "number" and custom == custom then
+		return math.clamp(custom, 0, maxP)
 	end
-	return 10
+	return maxP
 end
 
 -- Interpolation piecewise en log(P) le long d'une courbe donnée.
@@ -1779,6 +1788,10 @@ end
 function DunkLuckyBlockService:Init()
 	dunkRequestEvent = RemotesAPI.GetEvent("DunkRequestEvent")
 	dunkSequenceEvent = RemotesAPI.GetEvent("DunkSequenceEvent")
+	-- Crée le remote SetCustomPowerEvent (slider UI "SetKickPower"). Le client
+	-- envoie sa puissance choisie ici ; on la stocke par-joueur pour la lire
+	-- dans getPlayerPower au moment du dunk.
+	setCustomPowerEvent = RemotesAPI.GetEvent("SetCustomPowerEvent")
 	brainrotsFolder = ReplicatedStorage:WaitForChild("Brainrots")
 	luckyBlocksFolder = ReplicatedStorage:WaitForChild("LuckyBlocks")
 	wavesFolder = ReplicatedStorage:FindFirstChild("Waves")
@@ -1791,6 +1804,11 @@ function DunkLuckyBlockService:Start()
 	DunkCloneService = Loader.GetService("DunkCloneService")
 
 	tagBlockParts()
+
+	setCustomPowerEvent.OnServerEvent:Connect(function(player, value)
+		if typeof(value) ~= "number" or value ~= value then return end
+		customKickPower[player.UserId] = math.max(0, value)
+	end)
 
 	dunkRequestEvent.OnServerEvent:Connect(function(player, grade, fill)
 		-- Validation basique : grade doit être un string connu, fill un number [0,1].
@@ -1823,6 +1841,7 @@ function DunkLuckyBlockService:Start()
 		local userId = player.UserId
 		inSession[userId] = nil
 		lastDunkAt[userId] = nil
+		customKickPower[userId] = nil
 		-- Cleanup d'un éventuel running clone laissé par la session courante.
 		local clone = activeRunningClones[userId]
 		activeRunningClones[userId] = nil

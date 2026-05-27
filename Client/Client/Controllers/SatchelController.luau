@@ -84,7 +84,7 @@ local SLOT_KEYS = {
 }
 
 -- Icône topbar : petite icone de sac/inventaire.
-local INVENTORY_ICON_IMAGE = "rbxassetid://7733658133"
+local INVENTORY_ICON_IMAGE = "rbxassetid://95478805509883"
 
 -- ===== Etat =====
 
@@ -1267,6 +1267,8 @@ local function buildIcon()
 	local icon = IconModule.new()
 	icon:setName("InventoryIcon")
 	icon:setImage(INVENTORY_ICON_IMAGE)
+	icon:setImageScale(1.6)
+	icon:setImageRatio(1)
 	icon:setCaption("Inventory")
 	icon:setOrder(-5)
 	icon:align("Left")
