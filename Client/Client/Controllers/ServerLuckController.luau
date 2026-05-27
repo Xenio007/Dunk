@@ -27,9 +27,13 @@ local ServerLuckController = Loader.CreateController({
 })
 
 -- État local répliqué du serveur.
-local currentMultiplier = 1
-local expiresAt = 0         -- timestamp serveur (GetServerTimeNow)
-local serverTimeOffset = 0  -- différence entre serverTimeNow et client os.time() au moment du sync
+local currentMultiplier = 1   -- combiné SHOP * EVENT (utilisé pour l'icône BottomRight)
+local expiresAt = 0           -- timestamp serveur (max(SHOP, EVENT))
+local shopMultiplier = 1      -- slot SHOP seul (utilisé pour le shop "x4 -> x8")
+local shopExpiresAt = 0
+local eventMultiplier = 1
+local eventExpiresAt = 0
+local serverTimeOffset = 0    -- différence entre serverTimeNow et client os.time() au moment du sync
 
 -- UI refs.
 local luck1Label
@@ -62,17 +66,18 @@ end
 -- ===== SHOP UI =====
 
 local function refreshShopLabels()
+	-- Le shop affiche la progression du SLOT SHOP uniquement ("x2 -> x4"
+	-- progression d'achat). Le slot EVENT n'a pas à influencer le bouton Buy :
+	-- l'événement de likes est gratuit et ne se chevauche pas avec l'achat.
 	if luck1Label then
-		luck1Label.Text = "x" .. tostring(currentMultiplier)
+		luck1Label.Text = "x" .. tostring(shopMultiplier)
 		luck1Label.Visible = true
 	end
 	if luck2Label then
-		luck2Label.Text = "x" .. tostring(nextStep(currentMultiplier))
+		luck2Label.Text = "x" .. tostring(nextStep(shopMultiplier))
 		luck2Label.Visible = true
 	end
 	if arrowImg then arrowImg.Visible = true end
-	-- Le label "x6 (MAX)" était hardcodé dans le ScreenGui. Plus de cap ->
-	-- on le force masqué.
 	if maxLabel then maxLabel.Visible = false end
 	if buyLabel then buyLabel.Text = "Buy" end
 end
@@ -256,6 +261,10 @@ function ServerLuckController:Start()
 		if type(payload) ~= "table" then return end
 		currentMultiplier = tonumber(payload.Multiplier) or 1
 		expiresAt = tonumber(payload.ExpiresAt) or 0
+		shopMultiplier  = tonumber(payload.ShopMultiplier) or 1
+		shopExpiresAt   = tonumber(payload.ShopExpiresAt) or 0
+		eventMultiplier = tonumber(payload.EventMultiplier) or 1
+		eventExpiresAt  = tonumber(payload.EventExpiresAt) or 0
 		local serverNow = tonumber(payload.ServerNow) or Workspace:GetServerTimeNow()
 		serverTimeOffset = os.time() - serverNow
 		refreshShopLabels()

@@ -37,6 +37,21 @@ local BASE_JUMP_POWER = 50
 local BASE_JUMP_HEIGHT = 7.2
 local EQUIP_COOLDOWN = 0.3 -- anti-spam d'équipement rapide
 
+-- ===== Offset visuel du Handle (grip) =====
+-- Décale le poids depuis la RightHand vers le centre du corps pour donner
+-- l'illusion qu'il est tenu à deux mains (curl barbell). Modifier ça pour
+-- ajuster pixel-perfect : X négatif = vers la gauche (centre du torse), Y
+-- positif = remonté, Z positif = avance vers la caméra.
+--
+-- L'offset est appliqué PAR-DESSUS le tool.Grip d'origine du Tool (le Tool
+-- conserve sa rotation de base, on ne fait que translater).
+--
+-- IMPORTANT : ce contrôleur tourne CÔTÉ CLIENT. La modification de tool.Grip
+-- ici n'est visible QUE par le propriétaire du tool (pas par les autres
+-- joueurs). Si vous voulez que tout le monde voie le centrage, dupliquez la
+-- même ligne dans le script SERVEUR qui donne / configure le tool.
+local WEIGHT_OFFSET = CFrame.new(-1, 0, 0)
+
 local LIFT_SOUND_ID     = "rbxassetid://15675081158"
 local LIFT_SOUND_VOLUME = 0.6
 
@@ -58,6 +73,8 @@ function WeightAnimationController:Start()
 
 	-- État par session. Tout est réinitialisé au respawn.
 	local currentToolName = nil
+	local currentTool = nil
+	local originalGrip = nil  -- backup du tool.Grip avant décalage, pour restoration
 	local freezeConnection = nil
 	local lastEquipTime = 0 -- clock du dernier setupTool réussi, pour le cooldown
 
@@ -143,7 +160,26 @@ function WeightAnimationController:Start()
 		end
 	end
 
+	local function applyGripOffset(tool)
+		if not tool or not tool.Parent then return end
+		-- Sauve le grip d'origine UNE SEULE FOIS pour pouvoir le restaurer
+		-- proprement même si le tool est ré-équipé plusieurs fois.
+		if originalGrip == nil then
+			originalGrip = tool.Grip
+		end
+		tool.Grip = originalGrip * WEIGHT_OFFSET
+	end
+
+	local function restoreGripOffset()
+		if currentTool and currentTool.Parent and originalGrip then
+			currentTool.Grip = originalGrip
+		end
+		currentTool = nil
+		originalGrip = nil
+	end
+
 	local function cleanup(humanoid)
+		restoreGripOffset()
 		currentToolName = nil
 		if humanoid then
 			unfreezePlayer(humanoid)
@@ -172,9 +208,15 @@ function WeightAnimationController:Start()
 		cleanup(humanoid)
 
 		currentToolName = tool.Name
+		currentTool = tool
 
 		local character = humanoid.Parent
 		if not character then return end
+
+		-- Applique l'offset du grip pour centrer le Handle entre les deux mains.
+		-- Le Tool relit tool.Grip pour ajuster le Motor6D RightGrip créé par
+		-- Roblox à l'équipement, donc l'écriture prend effet immédiatement.
+		applyGripOffset(tool)
 
 		-- Freeze le perso pour que la pose de lift soit propre. Le Handle est
 		-- déjà attaché à la main droite par le Motor6D RightGrip natif que Roblox
